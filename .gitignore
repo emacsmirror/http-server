@@ -1,0 +1,6 @@
+# Documentation artifacts
+/docs/dir
+/docs/http-server.info
+
+# Compilation artifacts
+*.elc

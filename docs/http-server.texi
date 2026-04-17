@@ -1,0 +1,855 @@
+\input texinfo    @c -*- texinfo -*-
+@c %**start of header
+@setfilename http-server.info
+@settitle http-server.el
+@documentencoding UTF-8
+@documentlanguage en
+@syncodeindex fn cp
+@syncodeindex vr cp
+@c %**end of header
+
+@dircategory Emacs
+@direntry
+* Http-server: (http-server). speaks HTTP for you.
+@end direntry
+
+@finalout
+@titlepage
+@title http-server.el
+@author Marten Lienen
+@end titlepage
+
+@ifnottex
+@node Top
+@top http-server.el
+
+http-server is a minimal HTTP/1.1 server library for Emacs. It handles the details of the protocol on the wire@comma{} reading and writing requests from and to the network@comma{} and leaves everything else to you.
+
+@quotation
+This file is part of http-server.
+
+http-server is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation@comma{} either version 3 of the License@comma{} or (at your option) any later version.
+
+http-server is distributed in the hope that it will be useful@comma{} but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE@. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with http-server. If not@comma{} see @uref{https://www.gnu.org/licenses/}.
+
+@end quotation
+
+@end ifnottex
+
+@menu
+* Introduction::
+* Starting and Stopping a Server::
+* Requests::
+* Responses::
+* Client Disconnection::
+* WebSockets::
+* Examples::
+* Logging::
+* Utilities::
+* HTTP Feature Summary::
+* Index::
+
+@detailmenu
+--- The Detailed Node Listing ---
+
+Starting and Stopping a Server
+
+* Request Handlers::
+
+WebSockets
+
+* Sending data::
+
+Examples
+
+* Directory serving::
+* The worst possible shell::
+* Chat with M-x doctor via WebSocket::
+* Emacs key logger with server-sent events::
+* My IP address::
+
+@end detailmenu
+@end menu
+
+@node Introduction
+@chapter Introduction
+
+http-server speaks HTTP for you. It is a building block for other packages that want to offer an HTTP server inside of Emacs to communicate with the user or external programs. http-server's minimal design makes no assumptions on what that package will do with the server. It gets out of your way and grants you full control and responsibility over any aspect of the server that is not directly tied to the HTTP protocol itself.
+
+Conceptually@comma{} http-server is similar to Rust's @uref{https://hyper.rs/, hyper} or Node.js' @uref{https://nodejs.org/api/http.html#http, HTTP module}. To be more precise@comma{} http-server
+@itemize
+@item
+manages the server socket and client connections@comma{}
+@item
+parses HTTP requests and converts them into plist structures@comma{}
+@item
+sends plist-structured responses@comma{}
+@item
+deals with errors during parsing@comma{} handling and sending responses@comma{}
+@item
+has no global state
+@item
+and offers introspection through logging at configurable log levels.
+@end itemize
+However@comma{} http-server is also defined by what it does not do. It does not decode the request body. Instead@comma{} it gives you the unibyte string as it arrived in the request. Similarly@comma{} it does not decode a query string into a key-value map. Both of these require context knowledge or assumptions which are not part of the HTTP specification and would thus break with http-server's goal of conferring full control and responsibility to the user.
+
+@node Starting and Stopping a Server
+@chapter Starting and Stopping a Server
+
+@cindex starting a server
+@cindex stopping a server
+
+The entry point of this package is @code{http-server-start}@comma{} which starts a server socket and begins handing over requests to your request handler immediately. To shut down a server@comma{} call @code{http-server-stop}.
+
+Here is a minimal example that starts a server responding with "Hello@comma{} World!" to every request:
+
+@lisp
+(setq my-server
+      (http-server-start
+       :port 8080
+       :on-request
+       (lambda (request)
+         (list :status 'OK
+               :headers '((Content-Type . "text/plain"))
+               :body (encode-coding-string "Hello@comma{} World!" 'utf-8)))))
+@end lisp
+
+Stop it with:
+
+@lisp
+(http-server-stop my-server)
+@end lisp
+
+@defun http-server-start &key name host port on-request on-upgrade log-buffer log-level kill-log-buffer kill-connection-buffers default-status extra-methods extra-headers unknown-headers
+Start and return an HTTP server.
+
+NAME determines the process name for the server and client connections. It defaults to @code{"http-server"}.
+
+HOST and PORT specify the network address to bind to. HOST defaults to @code{"0.0.0.0"}. The default of @code{t} for PORT chooses any free port. Use @code{http-server-url} to discover the URL of the server when using a random port.
+
+ON-REQUEST is the HTTP request handler function. See @ref{Request Handlers}@comma{} @ref{Requests} and @ref{Responses}.
+
+ON-UPGRADE@comma{} if set@comma{} is called as @code{(funcall ON-UPGRADE PROC REQUEST SEND-RESPONSE)} whenever a request contains an @code{Upgrade} header. SEND-RESPONSE is a function the handler must call exactly once to send a response; calling it with status @code{101} (@code{Switching-Protocols}) keeps the connection open so the handler can take it over. Use @code{http-server-ws-on-upgrade} from @code{http-server-ws.el} to create a WebSocket upgrade handler. See @ref{WebSockets}.
+
+LOG-BUFFER controls where log messages go. If not given@comma{} a buffer named @code{*NAME*} is created automatically. Set LOG-BUFFER to @code{nil} explicitly to disable logging. See @ref{Logging}.
+
+LOG-LEVEL sets the server log level and must be one of @code{trace}@comma{} @code{debug}@comma{} @code{info}@comma{} @code{warning}@comma{} @code{error} or @code{nil}. If it is @code{nil}@comma{} logging happens according to @code{http-server-log-level}.
+
+If KILL-LOG-BUFFER is @code{t} (the default)@comma{} the log buffer is killed when the server is stopped.
+
+If KILL-CONNECTION-BUFFERS is @code{t} (the default)@comma{} connection buffers are killed when connections close.
+
+DEFAULT-STATUS is the status code used when the request handler returns a response without @code{:status}. It defaults to @code{Not-Found}.
+
+By default@comma{} the server accepts only the standard methods and headers listed in @code{http-server-methods} and @code{http-server-headers}. To accept others@comma{} pass lists of method and header symbols as EXTRA-METHODS and EXTRA-HEADERS@comma{} respectively. Unknown methods in a request are rejected with @code{400 Bad Request}.
+
+UNKNOWN-HEADERS is called as @code{(funcall UNKNOWN-HEADERS NAME)} for each header not in @code{http-server-headers} or EXTRA-HEADERS@comma{} where NAME is the raw header name string. It must return @code{nil} to drop the header or a symbol to use as the header name. The default is @code{#'ignore}@comma{} which drops all unknown headers. Use @code{#'intern} to accept all headers using their original name as a symbol or @code{#'identity} to keep them as strings.
+@end defun
+
+@defun http-server-stop server
+Stop SERVER@. This closes the network socket and@comma{} if @code{:kill-log-buffer} was @code{t} at creation time@comma{} kills the log buffer.
+@end defun
+
+@menu
+* Request Handlers::
+@end menu
+
+@node Request Handlers
+@section Request Handlers
+
+@cindex request handlers
+@cindex synchronous request handler
+@cindex asynchronous request handler
+
+@code{:on-request} is the request handler function. The server determines if it is synchronous or asynchronous from the function's arity:
+
+If the handler accepts exactly @emph{one argument}@comma{} it is called synchronously and must return the response directly:
+
+@lisp
+(lambda (request) ...)   ; called as (funcall handler request)@comma{} return value used
+@end lisp
+
+If the handler accepts exactly @emph{two arguments}@comma{} it is called asynchronously. The second argument is a continuation function. The handler must call it exactly once to deliver the response@comma{} which allows it to be deferred to a timer@comma{} process filter@comma{} or other callback:
+
+@lisp
+(lambda (request send-response) ...)   ; must call (funcall send-response RESPONSE) exactly once
+@end lisp
+
+@node Requests
+@chapter Requests
+
+@cindex request plist
+
+For each incoming HTTP request@comma{} http-server calls your request handler with the request as a plist.
+
+@lisp
+(:method METHOD
+ :path PATH
+ :query QUERY
+ :headers HEADERS
+ :body BODY
+ :connection CONNECTION)
+@end lisp
+
+@code{:method} is a symbol such as @code{GET}@comma{} @code{POST}@comma{} @code{PUT}@comma{} @code{DELETE}@comma{} @code{HEAD} or @code{PATCH}. http-server uses uppercase symbols with the canonical HTTP spelling. The server accepts GET@comma{} HEAD@comma{} POST@comma{} PUT@comma{} DELETE and PATCH requests. CONNECT@comma{} OPTIONS and TRACE are rejected automatically with @code{501 Not Implemented}.
+
+@code{:path} is the path component of the request target as a decoded multibyte string. For example@comma{} a request to @code{/hello%20world?foo=bar} produces a @code{:path} of @code{"/hello world"}.
+
+@code{:query} is the query component as a decoded multibyte string. In the example above@comma{} @code{:query} would be @code{"foo=bar"}. http-server does @emph{not} parse the query string into a key-value map@comma{} because the @code{key=value} convention is not part of any HTTP specification. You can use @code{url-parse-query-string} from the built-in @code{url-util} library for this. Both path and query are decoded from UTF-8 percent-encoding.
+
+@code{:headers} is an alist of header fields where each element is @code{(NAME . VALUE)}. NAME is a symbol with the canonical capitalization@comma{} such as @code{Content-Type}@comma{} @code{Accept} or @code{Host}. VALUE is a string. By default@comma{} only header field names listed in @code{http-server-headers} (or passed as @code{:extra-headers} to @code{http-server-start}) are included; unknown headers are silently dropped. See @code{:unknown-headers} in @code{http-server-start} for other strategies.
+
+@code{:body} is the raw message body as a unibyte string@comma{} or @code{nil} if the request has no body. http-server does not decode the body in any way -- it gives you the bytes exactly as they arrived. If you expect a UTF-8 encoded body@comma{} decode it yourself:
+
+@lisp
+(decode-coding-string (plist-get request :body) 'utf-8)
+@end lisp
+
+http-server supports both fixed-length (Content-Length) and chunked (Transfer-Encoding: chunked) request bodies.
+
+@code{:connection} is the Emacs network process for the client connection. This is an escape hatch for advanced use cases. See @ref{Processes,,, elisp, GNU Emacs Lisp Reference Manual} for details on network processes.
+
+@node Responses
+@chapter Responses
+
+@cindex response plist
+@cindex status codes
+@cindex chunked transfer encoding
+
+Your request handler must respond with a plist with the following optional keys:
+
+@lisp
+( :status STATUS
+  :headers HEADERS
+  :body BODY)
+@end lisp
+
+@code{:status} is the HTTP status code@comma{} specified as a symbol@comma{} an integer@comma{} or a string. As a symbol@comma{} use the reason phrase with spaces replaced by hyphens@comma{} such as @code{OK}@comma{} @code{Not-Found}@comma{} @code{Internal-Server-Error}. As an integer@comma{} use the numeric code@comma{} such as @code{200}@comma{} @code{404}@comma{} @code{500}. As a string@comma{} pass a full status line like @code{"418 I'm a Teapot"} for non-standard status codes. If @code{:status} is omitted@comma{} the server responds with the @code{:default-status} configured in @code{http-server-start} (which defaults to @code{Not-Found}). See @code{http-server-status-codes-and-phrases} for all supported symbol and integer codes.
+
+@code{:headers} is an alist of @code{(NAME . VALUE)} pairs where NAME is a symbol and VALUE is a string@comma{} for example:
+
+@lisp
+'((Content-Type . "application/json")
+  (Cache-Control . "no-cache"))
+@end lisp
+
+http-server automatically adds @code{Date} with the current UTC timestamp (unless you set it yourself) and @code{Content-Length} for a synchronous body or @code{Transfer-Encoding: chunked} for an asynchronous one.
+
+@code{:body} is either a unibyte string or a function for asynchronous streaming. If you have a multibyte string@comma{} encode it first:
+
+@lisp
+(encode-coding-string "Héllo" 'utf-8)
+@end lisp
+
+Sending a multibyte string signals an @code{http-server-error}.
+
+When @code{:body} is a function@comma{} the response is sent with @code{Transfer-Encoding: chunked}. The function is called as @code{(funcall BODY SEND-CHUNK)}. @code{SEND-CHUNK} sends one chunk and is called as @code{(funcall SEND-CHUNK CHUNK :keep-open KEEP-OPEN)} where @code{CHUNK} is a unibyte string. If @code{:keep-open} is t@comma{} the connection stays open for more chunks. If @code{:keep-open} is nil or omitted@comma{} the response is finalized and the connection is closed. For example:
+
+@lisp
+(list :status 'OK
+      :body (lambda (send-chunk)
+              (funcall send-chunk "first part" :keep-open t)
+              (funcall send-chunk "second part")))
+@end lisp
+
+The body function can also defer sending to a later time@comma{} for example from a timer or process filter@comma{} as long as it eventually closes the connection by calling SEND-CHUNK without @code{:keep-open}.
+
+Both SEND-RESPONSE and SEND-CHUNK signal @code{http-server-client-disconnected} if the connection is closed. Because the client can disconnect at any moment@comma{} this error can occur even immediately after a successful send@comma{} so callers holding long-lived references to SEND-RESPONSE or SEND-CHUNK should always be prepared to handle it. See @ref{Client Disconnection}.
+
+Here are a few complete response examples. A JSON response:
+
+@lisp
+(list :status 'OK
+      :headers '((Content-Type . "application/json"))
+      :body (encode-coding-string
+             (json-encode '((message . "success")))
+             'utf-8))
+@end lisp
+
+A redirect:
+
+@lisp
+(list :status 'Found
+      :headers '((Location . "https://example.com")))
+@end lisp
+
+A 204 No Content response with no body:
+
+@lisp
+'(:status No-Content)
+@end lisp
+
+An asynchronous request handler that delegates to an external process:
+
+@lisp
+(http-server-start
+ :port 8080
+ :on-request
+ (lambda (request send-response)
+   (make-process
+    :name "worker"
+    :command '("sleep" "1")
+    :sentinel
+    (lambda (_proc event)
+      (when (string-prefix-p "finished" event)
+        (funcall send-response
+                 '(:status OK :body "done")))))))
+@end lisp
+
+@node Client Disconnection
+@chapter Client Disconnection
+
+@cindex client disconnection
+@cindex http-server-client-disconnected
+
+When a client disconnects while the server is sending a response or streaming chunks@comma{} the send functions signal @code{http-server-client-disconnected}@comma{} a child of @code{http-server-error}. This applies to SEND-RESPONSE in asynchronous request handlers@comma{} SEND-CHUNK in streaming body functions and the WebSocket send functions.
+
+Because TCP disconnection is asynchronous@comma{} there is an inherent race between any liveness check and the actual send. Even if the connection appears open@comma{} the client may disconnect before the data reaches the socket. Therefore@comma{} code that holds long-lived references to send functions should always handle @code{http-server-client-disconnected}.
+
+A typical pattern for long-running connections such as server-sent events:
+
+@lisp
+(condition-case nil
+    (funcall send-chunk data :keep-open t)
+  (http-server-client-disconnected
+   ;; Mark the connection as closed and clean up server-side
+   ))
+@end lisp
+
+@table @asis
+@item Error: http-server-client-disconnected
+Signaled when an attempt to send data fails because the client has disconnected. Parent type: @code{http-server-error}. The signal data is a list @code{(MESSAGE ORIGINAL-ERROR)} where MESSAGE is a human-readable description and ORIGINAL-ERROR@comma{} if present@comma{} is the underlying error caught from @code{process-send-string}.
+@end table
+
+@node WebSockets
+@chapter WebSockets
+
+@cindex WebSocket
+@cindex upgrade, WebSocket
+
+http-server supports the WebSocket protocol (RFC 6455) via the @code{:on-upgrade} parameter of @code{http-server-start} combined with @code{http-server-ws-on-upgrade} from @code{http-server-ws.el}. @code{http-server-ws-on-upgrade} validates the WebSocket handshake and calls the handler. If the handler returns an acceptance plist containing @code{:on-message}@comma{} the connection is upgraded to WebSocket. Otherwise the return value is treated as a normal HTTP response (enabling custom rejection with any status code@comma{} or just returning @code{nil} to produce the @code{:default-status} response).
+
+Here is a complete echo server example:
+
+@lisp
+(require 'http-server-ws)
+(setq my-server
+      (http-server-start
+       :on-upgrade
+       (http-server-ws-on-upgrade
+        (lambda (req)
+          (pcase (plist-get req :path)
+            ("/ws"
+             (list :on-open    (lambda (conn) (message "Client connected"))
+                   :on-message (lambda (conn type msg)
+                                 (http-server-ws-send conn type msg))
+                   :on-close   (lambda (conn code reason)
+                                 (message "Client closed: %d %s" code reason))))
+            (_ nil))))))  ; reject other paths with default-status
+@end lisp
+
+@defun http-server-ws-on-upgrade on-websocket
+Return an upgrade handler for use as @code{:on-upgrade} in @code{http-server-start}. The returned handler is a function of three arguments @code{(PROC REQUEST SEND-RESPONSE)} as required by @code{:on-upgrade}. It validates the WebSocket request and@comma{} if valid@comma{} calls ON-WEBSOCKET with the request.
+
+ON-WEBSOCKET follows the same sync/async calling convention as @code{:on-request} (see @ref{Request Handlers}): if it accepts one argument it must return its result synchronously; if it accepts two arguments it receives a continuation RESPOND and must @code{(funcall RESPOND RESULT)} exactly once.
+
+The request plist passed to the ON-WEBSOCKET callback has the same shape as an HTTP request (see @ref{Requests})@comma{} plus an additional @code{:protocols} property. Its value is a list of subprotocol strings from the client's @code{Sec-WebSocket-Protocol} headers@comma{} or @code{nil} if none were requested.
+@end defun
+
+When ON-WEBSOCKET wants to accept the WebSocket connection@comma{} it must return (synchronously or asynchronously) a plist containing at least the key @code{:on-message}. Then http-server completes the upgrade (sends @code{101 Switching Protocols}) and installs the @code{:on-message} callback and any others. To reject the WebSocket connection@comma{} just return a basic HTTP response plist@comma{} see @ref{Responses}.
+
+The supported properties and callbacks for WebSockets are
+
+@table @asis
+@item @code{:protocol}
+An optional string naming the selected subprotocol. If non-nil@comma{} it is sent in the @code{Sec-WebSocket-Protocol} response header. Must be one of the values in @code{:protocols} from the upgrade request@comma{} or @code{nil} to decline subprotocol negotiation.
+
+@item @code{:on-message (CONN TYPE MESSAGE)}
+Called when a complete message arrives. TYPE is @code{'text} or @code{'binary}. For text frames@comma{} MESSAGE is a decoded multibyte string. For binary frames@comma{} MESSAGE is a unibyte string. Fragmented messages are reassembled before delivery.
+
+@item @code{:on-open (CONN)}
+Called immediately after the upgrade is complete and the @code{101} response has been sent.
+
+@item @code{:on-close (CONN CODE REASON)}
+Called when the connection closes@comma{} either cleanly or abnormally. CODE is an integer WebSocket close code (@code{1000} for normal closure@comma{} @code{1006} for abnormal closure without a Close frame). REASON is a string.
+
+@item @code{:on-ping (CONN PAYLOAD)}
+Called after the library automatically sends a Pong in response to a client Ping. PAYLOAD is a unibyte string.
+
+@item @code{:on-pong (CONN PAYLOAD)}
+Called when a Pong frame arrives@comma{} for example in response to a server-initiated @code{http-server-ws-ping}. PAYLOAD is a unibyte string.
+@end table
+
+@menu
+* Sending data::
+@end menu
+
+@node Sending data
+@section Sending data
+
+@cindex sending WebSocket messages
+@cindex ping, WebSocket
+@cindex closing a WebSocket connection
+
+In addition to reacting to incoming messages@comma{} the server can act on WebSocket connections in three ways: it can send UTF-8 text or binary data@comma{} it can send a ping to check if the client is still available and it can close the connection.
+
+@defun http-server-ws-send conn type message
+Send MESSAGE over WebSocket connection CONN@. TYPE is @code{'text} or @code{'binary}. For text frames@comma{} MESSAGE is a multibyte string that will be UTF-8 encoded. For binary frames@comma{} MESSAGE is a unibyte string sent as-is. Signals an error if the connection is not in the OPEN state@comma{} for example after @code{http-server-ws-close} has been called.
+@end defun
+
+@defun http-server-ws-ping conn &optional payload
+Send a Ping frame on CONN@. PAYLOAD is an optional unibyte string of at most 125 bytes. The library automatically responds to the resulting Pong from the client; if @code{:on-pong} is set@comma{} it will be called when the Pong arrives.
+@end defun
+
+@defun http-server-ws-close conn &optional code reason
+Initiate the WebSocket closing handshake on CONN@. CODE is an integer status code (defaults to @code{1000}). REASON is an optional string. The library sends a Close frame; when the client responds with its own Close frame@comma{} the TCP connection is closed and @code{:on-close} is called.
+@end defun
+
+@code{http-server-ws-send} and @code{http-server-ws-ping} signal @code{http-server-client-disconnected} if the underlying connection is closed@comma{} for example due to client timeout. See @ref{Client Disconnection}.
+
+@node Examples
+@chapter Examples
+
+The following examples showcase various functionalities of http-server and http-server-ws.
+
+@menu
+* Directory serving::
+* The worst possible shell::
+* Chat with M-x doctor via WebSocket::
+* Emacs key logger with server-sent events::
+* My IP address::
+@end menu
+
+@node Directory serving
+@section Directory serving
+
+Serve the current directory and its files over HTTP@.
+
+@lisp
+(setq my-server
+      (http-server-start
+       :name "dir-server"
+       :on-request
+       (lambda (request)
+         (let* ((path (plist-get request :path))
+                (base (expand-file-name "." default-directory))
+                (file (expand-file-name (substring path 1) base)))
+           (cond
+            ;; Prevent path traversal
+            ((not (string-prefix-p base file))
+             (list :status 'Forbidden
+                   :headers '((Content-Type . "text/plain"))
+                   :body (encode-coding-string "Forbidden" 'utf-8)))
+            ;; Directory listing
+            ((file-directory-p file)
+             (let* ((entries (directory-files file nil nil t))
+                    (html (concat
+                           "<html><body><h1>Index of " path "</h1><ul>"
+                           (mapconcat
+                            (lambda (entry)
+                              (let ((href (concat path
+                                                  (unless (string-suffix-p "/" path) "/")
+                                                  entry
+                                                  (if (file-directory-p
+                                                       (expand-file-name entry file))
+                                                      "/" ""))))
+                                (format "<li><a href=\"%s\">%s</a></li>" href entry)))
+                            entries "\n")
+                           "</ul></body></html>")))
+               (list :status 'OK
+                     :headers '((Content-Type . "text/html; charset=utf-8"))
+                     :body (encode-coding-string html 'utf-8))))
+            ;; Serve file
+            ((file-regular-p file)
+             (let ((content (with-temp-buffer
+                              (set-buffer-multibyte nil)
+                              (insert-file-contents-literally file)
+                              (buffer-string)))
+                   (mime (mailcap-file-name-to-mime-type file)))
+               (list :status 'OK
+                     :headers `((Content-Type . @comma{}(or mime "application/octet-stream")))
+                     :body content)))
+            (t
+             (list :status 'Not-Found
+                   :headers '((Content-Type . "text/plain"))
+                   :body (encode-coding-string "Not Found" 'utf-8))))))))
+(browse-url (http-server-url my-server))
+@end lisp
+
+Stop it with:
+
+@lisp
+(http-server-stop my-server)
+@end lisp
+
+@node The worst possible shell
+@section The worst possible shell
+
+A form that sends post requests to execute commands and display their outputs.
+
+@lisp
+(setq my-server
+      (http-server-start
+       :name "shell-server"
+       :log-level 'trace
+       :on-request
+       (lambda (request)
+         (pcase (plist-get request :method)
+           ('GET
+            (list :status 'OK
+                  :headers '((Content-Type . "text/html; charset=utf-8"))
+                  :body (encode-coding-string
+                         "<html><body>
+<h1>The Worst Possible Shell</h1>
+<form method=\"post\">
+  <label>$ <input type=\"text\" name=\"cmd\" autofocus
+                  style=\"width:60%\"></label>
+  <button type=\"submit\">Run</button>
+</form>
+</body></html>"
+                         'utf-8)))
+           ('POST
+            (cl-flet ((decode (s) (decode-coding-string (url-unhex-string (string-replace "+" " " s)) 'utf-8)))
+              (let* ((params (mapcar (lambda (f) (let ((p (string-search "=" f)))
+                                                   (cons (decode (substring f 0 p))
+                                                         (decode (substring f (1+ p))))))
+                                     (split-string (plist-get request :body) "&" t)))
+                     (cmd (cdr (assoc "cmd" params)))
+                     (output (condition-case err
+                                 (shell-command-to-string cmd)
+                               (error (error-message-string err)))))
+                (list :status 'OK
+                      :headers '((Content-Type . "text/html; charset=utf-8"))
+                      :body (encode-coding-string
+                             (format "<html><body>
+<h1>The Worst Possible Shell</h1>
+<form method=\"post\">
+  <label>$ <input type=\"text\" name=\"cmd\" value=\"%s\"
+                  autofocus onfocus=\"this.select()\" style=\"width:60%%\"></label>
+  <button type=\"submit\">Run</button>
+</form>
+<pre>%s</pre>
+</body></html>"
+                                     (xml-escape-string cmd t)
+                                     (xml-escape-string
+                                      (replace-regexp-in-string "[^\t\n\r\x20-\xff]" "?" output) t))
+                             'utf-8)))))))))
+(browse-url (http-server-url my-server))
+@end lisp
+
+Stop it with:
+
+@lisp
+(http-server-stop my-server)
+@end lisp
+
+@node Chat with M-x doctor via WebSocket
+@section Chat with M-x doctor via WebSocket
+
+A minimal website that allows one to chat with @code{M-x doctor} over a WebSocket.
+
+@lisp
+(require 'http-server-ws)
+(require 'doctor)
+(setq my-server
+      (http-server-start
+       :name "doctor-chat"
+       :log-level 'trace
+       :on-request
+       (lambda (request)
+         (when (eq (plist-get request :method) 'GET)
+           (list :status 'OK
+                 :headers '((Content-Type . "text/html; charset=utf-8"))
+                 :body (encode-coding-string
+                        "<html><body>
+<h1>Chat with M-x doctor</h1>
+<div id=\"chat\" style=\"white-space:pre-wrap;height:400px;overflow:auto;
+     border:1px solid #ccc;padding:8px;margin-bottom:8px\"></div>
+<form id=\"form\">
+  <input id=\"input\" type=\"text\" autofocus style=\"width:80%\"
+         placeholder=\"Tell me about your problems...\">
+  <button type=\"submit\">Send</button>
+</form>
+<script>
+  const chat = document.getElementById('chat');
+  const form = document.getElementById('form');
+  const input = document.getElementById('input');
+  const ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.onmessage = function(e) @{
+    chat.textContent += 'Doctor: ' + e.data + '\\n\\n';
+    chat.scrollTop = chat.scrollHeight;
+  @};
+  ws.onopen = function() @{
+    chat.textContent += 'Doctor: Tell me about your problems.\\n\\n';
+  @};
+  form.onsubmit = function(e) @{
+    e.preventDefault();
+    if (input.value) @{
+      chat.textContent += 'You: ' + input.value + '\\n\\n';
+      ws.send(input.value);
+      input.value = '';
+    @}
+  @};
+</script>
+</body></html>"
+                        'utf-8))))
+       :on-upgrade
+       (http-server-ws-on-upgrade
+        (lambda (req)
+          (when (equal (plist-get req :path) "/ws")
+            (list
+               :on-open
+               (lambda (conn)
+                 (let ((buf (generate-new-buffer " *doctor-ws*")))
+                   (with-current-buffer buf (doctor-mode))
+                   (process-put conn :doctor-buffer buf)))
+               :on-message
+               (lambda (conn _type msg)
+                 (let ((buf (process-get conn :doctor-buffer)))
+                   (with-current-buffer buf
+                     (goto-char (point-max))
+                     (insert msg "\n")
+                     (let* ((doctor-sent (mapcar #'intern (split-string (downcase msg) "[ \t\n]+" t)))
+                            (start (point)))
+                       (doctor-doc)
+                       (let ((reply (string-trim (buffer-substring start (point-max)))))
+                         (http-server-ws-send conn 'text reply))))))
+               :on-close
+               (lambda (conn _code _reason)
+                 (kill-buffer (process-get conn :doctor-buffer)))))))))
+(browse-url (http-server-url my-server))
+@end lisp
+
+Stop it with:
+
+@lisp
+(http-server-stop my-server)
+@end lisp
+
+@node Emacs key logger with server-sent events
+@section Emacs key logger with server-sent events
+
+Every keystroke in Emacs appears live in the browser@comma{} streamed via server-sent events.
+
+@lisp
+(defvar my-sse-connections nil)
+(setq my-server
+      (http-server-start
+       :name "key-logger"
+       :on-request
+       (lambda (request)
+         (pcase (plist-get request :path)
+           ("/"
+            (list :status 'OK
+                  :headers '((Content-Type . "text/html; charset=utf-8"))
+                  :body (encode-coding-string
+                         "<html><body>
+<h1>Emacs Key Logger</h1>
+<pre id=\"keys\" style=\"font-size:1.2em\"></pre>
+<script>
+  const keys = document.getElementById('keys');
+  const source = new EventSource('/events');
+  source.onmessage = function(e) @{
+    keys.textContent += e.data;
+  @};
+</script>
+</body></html>"
+                         'utf-8)))
+           ("/events"
+            (list :status 'OK
+                  :headers '((Content-Type . "text/event-stream")
+                             (Cache-Control . "no-cache"))
+                  :body (lambda (send-chunk)
+                          (push send-chunk my-sse-connections))))))))
+(defvar my-sse-hook
+  (lambda ()
+          (let ((desc (key-description (this-command-keys-vector))))
+            (setq my-sse-connections
+                  (cl-loop for send in my-sse-connections
+                           when (condition-case nil
+                                    (progn
+                                      (funcall send
+                                               (encode-coding-string
+                                                (format "data: %s \n\n" desc)
+                                                'utf-8)
+                                               :keep-open t)
+                                      t)
+                                  (http-server-client-disconnected nil))
+                           collect send)))))
+
+(add-hook 'post-command-hook my-sse-hook)
+(browse-url (http-server-url my-server))
+@end lisp
+
+Stop it with:
+
+@lisp
+(remove-hook 'post-command-hook my-sse-hook)
+(setq my-sse-connections nil)
+(http-server-stop my-server)
+@end lisp
+
+@node My IP address
+@section My IP address
+
+Respond to GET requests with the client's IP address and the current time if the query contains a @samp{time=yes} parameter.
+
+@lisp
+(setq my-server
+      (http-server-start
+       :host "0.0.0.0"
+       :name "my-ip"
+       :on-request
+       (lambda (request)
+         (when (eq (plist-get request :method) 'GET)
+           (let* ((conn (plist-get request :connection))
+                  (addr (format "%s" (process-contact conn :host)))
+                  (query (or (plist-get request :query) ""))
+                  (params (url-parse-query-string query))
+                  (show-time (equal (cdr (assoc "time" params)) '("yes")))
+                  (body (if show-time
+                            (format "%s\n%s" addr (format-time-string "%Y-%m-%d %H:%M:%S %Z"))
+                          addr)))
+             (list :status 'OK
+                   :headers '((Content-Type . "text/plain"))
+                   :body (encode-coding-string body 'utf-8)))))))
+(browse-url (http-server-url my-server))
+@end lisp
+
+Try it with the time parameter:
+
+@lisp
+(browse-url (http-server-url my-server "/?time=yes"))
+@end lisp
+
+Stop it with:
+
+@lisp
+(http-server-stop my-server)
+@end lisp
+
+@node Logging
+@chapter Logging
+
+@cindex logging
+@cindex log levels
+
+http-server logs requests@comma{} responses and errors to a dedicated buffer. Each log line is prefixed with a timestamp@comma{} log level@comma{} host and port.
+
+There are five log levels@comma{} from most to least verbose: @code{trace}@comma{} @code{debug}@comma{} @code{info}@comma{} @code{warning}@comma{} @code{error}. At @code{info} level@comma{} you see each request method and path and the response status code. At @code{debug} level@comma{} headers are included. At @code{trace} level@comma{} message bodies and connection events are logged as well.
+
+The log level can be set per server or globally.
+
+@defvar http-server-log-level
+The fallback log level used by servers that do not specify their own. Defaults to @code{info}.
+@end defvar
+
+To set the log level for a specific server@comma{} pass @code{:log-level} to @code{http-server-start}:
+
+@lisp
+(http-server-start :on-request #'my-handler :log-level 'debug)
+@end lisp
+
+To disable logging entirely@comma{} pass @code{:log-buffer nil} explicitly:
+
+@lisp
+(http-server-start :on-request #'my-handler :log-buffer nil)
+@end lisp
+
+@defun http-server-log-buffer server
+Return the log buffer of SERVER@comma{} or @code{nil} if logging is disabled.
+@end defun
+
+An example log at @code{trace} level could@comma{} for example@comma{} look like
+
+@example
+2026/04/07 16:59:45.561 INFO  0.0.0.0:37743: Server started
+2026/04/07 16:59:46.819 INFO  0.0.0.0:37743: New connection: (127.0.0.1 35230) - accept from 127.0.0.1
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: Chunk received: 599 bytes
+2026/04/07 16:59:46.819 INFO  127.0.0.1:35230: > GET /
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Host: 127.0.0.1:37743
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Accept: text/html@comma{}application/xhtml+xml@comma{}application/xml;q=0.9@comma{}*/*;q=0.8
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Accept-Language: en-US@comma{}de-DE;q=0.9
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Accept-Encoding: gzip@comma{} deflate@comma{} br@comma{} zstd
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > DNT: 1
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Sec-GPC: 1
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Connection: keep-alive
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Upgrade-Insecure-Requests: 1
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Sec-Fetch-Dest: document
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Sec-Fetch-Mode: navigate
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Sec-Fetch-Site: none
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Sec-Fetch-User: ?1
+2026/04/07 16:59:46.819 DEBUG 127.0.0.1:35230: > Priority: u=0@comma{} i
+2026/04/07 16:59:46.819 TRACE 127.0.0.1:35230: No message body
+2026/04/07 16:59:46.820 INFO  127.0.0.1:35230: < 200 OK
+2026/04/07 16:59:46.820 DEBUG 127.0.0.1:35230: < Date: Tue@comma{} 07 Apr 2026 14:59:46 GMT
+2026/04/07 16:59:46.820 DEBUG 127.0.0.1:35230: < Content-Length: 406
+2026/04/07 16:59:46.820 DEBUG 127.0.0.1:35230: < Content-Type: text/html; charset=utf-8
+2026/04/07 16:59:46.820 TRACE 127.0.0.1:35230: <
+2026/04/07 16:59:46.820 TRACE 127.0.0.1:35230: < <html><body><h1>Index of /</h1><ul><li><a href="/http-server
+2026/04/07 16:59:46.820 TRACE 127.0.0.1:35230: < .org">http-server.org</a></li>×<li><a href="/dir">dir</a></l
+2026/04/07 16:59:46.820 TRACE 127.0.0.1:35230: < i>×<li><a href="/http-server.info">http-server.info</a></li>
+2026/04/07 16:59:46.820 TRACE 127.0.0.1:35230: < ×<li><a href="/http-server.texi">http-server.texi</a></li>×<
+2026/04/07 16:59:46.820 TRACE 127.0.0.1:35230: < li><a href="/websocket.el">websocket.el</a></li>×<li><a href
+2026/04/07 16:59:46.820 TRACE 127.0.0.1:35230: < ="/agents/">agents</a></li>×<li><a href="/../">..</a></li>×<
+2026/04/07 16:59:46.820 TRACE 127.0.0.1:35230: < li><a href="/./">.</a></li></ul></body></html>
+2026/04/07 16:59:46.820 TRACE 127.0.0.1:35230: Process event: deleted
+2026/04/07 16:59:46.821 TRACE 127.0.0.1:35230: Connection closed
+@end example
+
+@node Utilities
+@chapter Utilities
+
+@defun http-server-url server &optional path &key protocol
+Generate a URL for PATH on SERVER using PROTOCOL@. PATH defaults to @code{"/"}. PROTOCOL defaults to @code{"http"}. This is useful when the server was started with @code{:port t} and you need to discover the assigned port.
+
+@lisp
+(http-server-url my-server)        ;=> "http://0.0.0.0:54321/"
+(http-server-url my-server "/api") ;=> "http://0.0.0.0:54321/api"
+@end lisp
+@end defun
+
+@node HTTP Feature Summary
+@chapter HTTP Feature Summary
+
+http-server implements a subset of HTTP/1.1 as defined in RFC 9112 and http-server-ws adds WebSocket support per RFC 6455.
+
+Supported:
+
+@itemize
+@item
+HTTP methods: GET@comma{} HEAD@comma{} POST@comma{} PUT@comma{} DELETE and PATCH (RFC 5789).
+@item
+Request bodies: fixed-length (Content-Length) and chunked (Transfer-Encoding: chunked).
+@item
+Response bodies: fixed-length (string) and chunked (streaming function).
+@item
+Synchronous and asynchronous request handlers.
+@item
+Request targets in origin-form (@code{/path?query}).
+@item
+WebSocket upgrade (RFC 6455): opening handshake@comma{} text and binary messages@comma{} fragmentation reassembly@comma{} ping/pong@comma{} clean and abnormal close handshake.
+@end itemize
+
+Not supported:
+
+@itemize
+@item
+The CONNECT@comma{} OPTIONS and TRACE methods. The server responds with @code{501 Not Implemented}.
+@item
+Request targets in absolute-form@comma{} authority-form or asterisk-form@comma{} as these are only relevant for proxy servers and the unsupported methods above.
+@item
+Header field values outside the visible ASCII range@comma{} since non-ASCII header values are an HTTP/1.0 compatibility feature.
+@item
+WebSocket extensions (RFC 6455 §9): extension negotiation is not implemented. Extension requests from clients are silently ignored.
+@end itemize
+
+@node Index
+@chapter Index
+
+@printindex cp
+
+@bye
