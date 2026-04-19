@@ -19,7 +19,7 @@ INIT_PACKAGES="(progn \
       (unless (package-installed-p pkg) \
         (package-install pkg)))))"
 
-.PHONY: all docs clean test lint
+.PHONY: all docs clean test lint byte-compile checkdoc package-lint
 
 all: docs
 
