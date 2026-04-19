@@ -76,8 +76,8 @@ HTTP response plist and the upgrade is rejected.
 Accepted RESULT keys:
 
 :on-message ON-MESSAGE -- Required.  Called as (funcall ON-MESSAGE CONN
-TYPE MESSAGE) when a complete message arrives.  TYPE is `text' or
-`binary'.  For text frames MESSAGE is a decoded multibyte string; for
+TYPE MESSAGE) when a complete message arrives.  TYPE is \\='text or
+\\='binary.  For text frames MESSAGE is a decoded multibyte string; for
 binary frames it is a unibyte string.  Fragmented messages are
 reassembled before delivery.
 
@@ -201,7 +201,7 @@ the WebSocket connection."
   "Parse and validate a WebSocket frame from the current buffer.
 
 Returns:
-  `incomplete'    -- more data needed
+  \\='incomplete     -- more data needed
   (CODE . REASON) -- protocol violation; CODE is a WebSocket close code
                      and REASON a string for logging
   plist           -- (:fin FIN :opcode OPCODE :payload PAYLOAD)
@@ -535,7 +535,7 @@ open."
 (defun http-server-ws-send (conn type message)
   "Send MESSAGE over WebSocket connection CONN.
 
-TYPE is `text' or `binary'.  For text frames, MESSAGE is a multibyte
+TYPE is \\='text or \\='binary.  For text frames, MESSAGE is a multibyte
 string that will be UTF-8 encoded.  For binary frames, MESSAGE is a
 unibyte string sent as-is."
   (let ((ws (process-get conn :websocket)))

@@ -188,7 +188,7 @@ evaluate BODY for a message.  If the message is nil, nothing is logged."
                     `(when-let* (((<= ,proc-level-pos ,(seq-position http-server-log-levels level)))
                                  (,message (progn ,@body)))
                        (let ((prefix (format "%s %s %s:%d: "
-                                             (format-time-string "%Y/%m/%d %H:%M:%S.%3N")
+                                             (format-time-string "%Y/%m/%d %T.%3N")
                                              ,level-name ,host ,port)))
                          (insert (http-server--prefix-lines prefix ,message) "\n")))))
                 clauses))
@@ -251,17 +251,17 @@ send RESPONSE asynchronously.
 
 In both cases, REQUEST is a plist (:method METHOD :path PATH :query
 QUERY :headers HEADERS :body BODY :connection CONNECTION).  METHOD is
-the request method as a symbol such as `GET' or `POST'.  PATH and QUERY
-are the path and query components of the request target as decoded
+the request method as a symbol such as \\='GET or \\='POST.  PATH and
+QUERY are the path and query components of the request target as decoded
 multibyte strings.  HEADERS is an alist of (NAME . VALUE) header fields
-where NAME is a symbol such as `Content-Type' and VALUE is a string.
+where NAME is a symbol such as \\='Content-Type and VALUE is a string.
 BODY is a unibyte string without any decoding applied.  CONNECTION is
 the network connection to the client, see info node `(elisp)Network'.
 
 Similarly in both cases, RESPONSE is a plist (:status STATUS :headers
 HEADERS :body BODY) where all entries are optional.  STATUS is the
 response status either as an integer code like 404, a symbol such as
-`OK' or `Not-Found' or a full status line string like \"200 OK\" for
+\\='OK or \\='Not-Found or a full status line string like \"200 OK\" for
 non-standard status codes.  If STATUS is not given, respond with
 DEFAULT-STATUS.  HEADERS is again an alist of (NAME . VALUE) header
 fields where NAME is a symbol and VALUE is a string.  BODY is either a
@@ -289,9 +289,9 @@ http-server-ws.el to create a WebSocket upgrade handler.
 
 If no LOG-BUFFER is given, a buffer named *NAME* is created
 automatically for logging. Set LOG-BUFFER to nil explicitly to disable
-logging. LOG-LEVEL sets the server log level and must be one of `trace',
-`debug', `info', `warning', `error' or nil. If it is nil, logging
-happens according to `http-server-log-level'.
+logging. LOG-LEVEL sets the server log level and must be one of
+\\='trace, \\='debug, \\='info, \\='warning, \\='error or nil. If it is
+nil, logging happens according to `http-server-log-level'.
 
 If KILL-LOG-BUFFER is t, kill the log buffer when stopping the server.
 If KILL-CONNECTION-BUFFERS is t, kill connection buffers when
@@ -549,7 +549,7 @@ MESSAGE contains additional information."
   "Parse the current buffer as an HTTP request.
 
 Returns:
-  `incomplete'       -- more data needed
+  \\='incomplete        -- more data needed
   (STATUS . CONTEXT) -- parse error; STATUS is a symbol denoting an HTTP
                         status code, CONTEXT a string
   plist              -- (:method METHOD :target TARGET :headers HEADERS
@@ -785,7 +785,7 @@ is sent."
       ;; RFC9110: An origin server with a clock MUST generate a Date header field.
       (unless (assoc 'Date headers)
         (let ((system-time-locale "C"))
-          (setq headers (cons (cons 'Date (format-time-string "%a, %d %b %Y %H:%M:%S GMT" nil t))
+          (setq headers (cons (cons 'Date (format-time-string "%a, %d %b %Y %T GMT" nil t))
                               headers))))
 
       ;; Build and send the response header
