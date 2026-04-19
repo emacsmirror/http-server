@@ -298,6 +298,11 @@ Respond to GET requests with the client's IP address and the current time if the
   (browse-url (http-server-url my-server))
 #+end_src
 
+** In the wild
+
+The following projects use http-server:
+- [[https://codeberg.org/martenlienen/emcp][EMCP]]: An MCP server for Emacs
+
 * HTTP-related RFCs & Specifications
 
 http-server implements a subset of HTTP/1.1 as defined in [[https://www.rfc-editor.org/rfc/rfc9112.html][RFC 9112]] and http-server-ws adds WebSocket support per [[https://www.rfc-editor.org/rfc/rfc6455.html][RFC 6455]].
