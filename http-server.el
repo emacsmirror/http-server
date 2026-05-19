@@ -392,12 +392,14 @@ MESSAGE contains additional information."
                      :kill-connection-buffers))
     (process-put proc keyword (process-get server keyword)))
   (set-process-sentinel proc #'http-server--request-sentinel)
-  (set-process-buffer proc
-                      (generate-new-buffer
-                       (format " *%s-connection* <%s:%s>"
-                               (process-name server)
-                               (process-contact proc :host)
-                               (process-contact proc :service)))))
+  (let ((buffer (generate-new-buffer
+                 (format " *%s-connection* <%s:%s>"
+                         (process-name server)
+                         (process-contact proc :host)
+                         (process-contact proc :service)))))
+    ;; Write network data as raw bytes into the buffer
+    (with-current-buffer buffer (set-buffer-multibyte nil))
+    (set-process-buffer proc buffer)))
 
 (defun http-server--close-connection (proc)
   "Close connection PROC: delete the process and its buffers."

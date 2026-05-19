@@ -179,6 +179,23 @@ b")
                       :headers (("Content-Length" . "3"))
                       :body "a\nb")))))
 
+(ert-deftest http-server-parse-a-request-with-utf-8-body ()
+  "Parse a request with multi-byte UTF-8 as raw bytes."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    ;; 'café' encoded as UTF-8 is 5 bytes; Content-Length is in bytes.
+    (insert "POST /u HTTP/1.1\r
+Content-Length: 5\r
+\r
+")
+    (insert (unibyte-string ?c ?a ?f #xc3 #xa9))
+    (let ((parsed (http-server--parse-http-request)))
+      (should (equal (plist-get parsed :method) "POST"))
+      (let ((body (plist-get parsed :body)))
+        (should-not (multibyte-string-p body))
+        (should (= (length body) 5))
+        (should (equal (decode-coding-string body 'utf-8) "café"))))))
+
 (ert-deftest http-server-parse-request-chunked-transmission ()
   "Parse a request arriving in chunks from the network."
   (with-temp-buffer
