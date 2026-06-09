@@ -173,7 +173,8 @@ evaluate BODY for a message.  If the message is nil, nothing is logged."
     `(when-let* ((,log-buffer (process-get ,proc :log-buffer))
                  ((buffer-live-p ,log-buffer)))
        (with-current-buffer ,log-buffer
-         (let* ((,point-at-max (equal (point) (point-max)))
+         (let* ((inhibit-read-only t)
+                (,point-at-max (equal (point) (point-max)))
                 (,proc-level (or (process-get ,proc :log-level) http-server-log-level))
                 (,proc-level-pos (seq-position http-server-log-levels ,proc-level))
                 (,host (process-contact ,proc :host))
@@ -355,7 +356,10 @@ strings."
                             :kill-connection-buffers ,kill-connection-buffers))))
     (when (and (not log-buffer) (not log-buffer-given))
       ;; Generate a log-buffer if it was not explicitly set to nil
-      (setq log-buffer (generate-new-buffer (format "*%s*" name))))
+      (setq log-buffer (generate-new-buffer (format "*%s*" name)))
+      ;; Prevent accidental edits when the user views the log
+      (with-current-buffer log-buffer
+        (setq buffer-read-only t)))
     (when log-buffer
       ;; Set as process buffer, so that killing the buffer stops the server
       (set-process-buffer server log-buffer)
