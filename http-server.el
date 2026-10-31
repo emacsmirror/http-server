@@ -779,7 +779,9 @@ is sent."
         (signal 'http-server-error '("Cannot send multibyte body. Encode first.")))
       (setq headers (cons `(Content-Length . ,(number-to-string (length body))) headers)))
      ((functionp body)
-      (setq headers (cons `(Transfer-Encoding . "chunked") headers))))
+      (setq headers (cons `(Transfer-Encoding . "chunked") headers)))
+     (t
+      (setq headers (cons `(Content-Length . "0") headers))))
 
     ;; Resolve status to a status line string
     (let ((status-line (if (stringp status)

@@ -505,5 +505,16 @@ Content-Type: text/html
                           :status 406
                           :body "body async or not?"))))
 
+(ert-deftest http-server-no-body-has-content-length-0 ()
+  (with-server server (http-server-start
+                       :kill-log-buffer nil
+                       :on-request
+                       (lambda (_request send-response)
+                         (funcall send-response `(:status OK)))
+                       :log-level 'trace)
+    (should (respond-with (plz-server 'get server "/")
+                          :status 200
+                          :headers '((Content-Length . "0"))))))
+
 (provide 'http-server-tests)
 ;;; http-server-tests.el ends here
