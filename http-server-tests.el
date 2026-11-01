@@ -743,6 +743,28 @@ Content-Type: text/html
                                  (with-current-buffer (process-buffer conn)
                                    (buffer-string))))))))
 
+(ert-deftest http-server-stop-closes-connections ()
+  (let (send-response)
+    (with-server server (http-server-start
+                         :on-request (lambda (request send)
+                                       (if (equal (plist-get request :path) "/pending")
+                                           (setq send-response send)
+                                         (funcall send '(:status OK))))
+                         :log-level 'trace)
+      (with-server other-server (http-server-start :on-request (lambda (_request) '(:status OK))
+                                                   :log-level 'trace)
+        (with-raw-connection idle server
+          (with-raw-connection pending server
+            (with-raw-connection other other-server
+              (raw-response idle "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+              (process-send-string pending "GET /pending HTTP/1.1\r\nHost: x\r\n\r\n")
+              (wait-for send-response)
+              (raw-response other "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+              (http-server-stop server)
+              (should (raw-closed-p idle))
+              (should (raw-closed-p pending))
+              (should-not (raw-closed-p other)))))))))
+
 ;;; Request order
 
 (ert-deftest http-server-answers-pipelined-requests-in-order ()

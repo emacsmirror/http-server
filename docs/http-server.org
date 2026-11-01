@@ -83,7 +83,7 @@ Stop it with:
 
 - Function: http-server-stop server ::
 
-  Stop SERVER. This closes the network socket and, if ~:kill-log-buffer~ was ~t~ at creation time, kills the log buffer.
+  Stop SERVER. This closes the network socket and all client connections, including ones with responses in progress, and, if ~:kill-log-buffer~ was ~t~ at creation time, kills the log buffer.
 
 ** Request Handlers
 #+cindex: request handlers

@@ -374,8 +374,12 @@ strings."
     server))
 
 (cl-defun http-server-stop (server)
-  "Stop SERVER: Close the network socket and delete buffers."
+  "Stop SERVER: Close the network socket, all connections and delete buffers."
   (delete-process server)
+  ;; Emacs keeps accepted connections open after deleting the server
+  (dolist (proc (process-list))
+    (when (eq (process-get proc :server) server)
+      (http-server--close-connection proc)))
   (when-let* (((process-get server :kill-log-buffer))
               (log-buffer (process-get server :log-buffer))
               ((buffer-live-p log-buffer)))
@@ -400,6 +404,7 @@ MESSAGE contains additional information."
                      :default-status
                      :kill-connection-buffers))
     (process-put proc keyword (process-get server keyword)))
+  (process-put proc :server server)
   (process-put proc :state 'idle)
   (process-put proc :request-id 0)
   (set-process-sentinel proc #'http-server--request-sentinel)
