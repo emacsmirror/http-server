@@ -332,6 +332,19 @@ with body text.")))))
 
 ;;; Parsing incomplete request
 
+(ert-deftest http-server-parse-every-prefix-of-a-chunked-request-as-incomplete ()
+  "Parse a chunked request that might be cut off anywhere by the network."
+  (let ((request "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;ext\r\nhello\r\n0\r\n\r\n"))
+    (dotimes (end (length request))
+      (with-temp-buffer
+        (insert (substring request 0 end))
+        (should (equal (cons end (http-server--parse-http-request))
+                       (cons end 'incomplete)))))
+    (with-temp-buffer
+      (insert request)
+      (should (equal (http-server--parse-http-request)
+                     '(:method "POST" :target "/" :headers () :body "hello"))))))
+
 (ert-deftest http-server-parse-a-request-with-incomplete-body ()
   "Parse a request with incomplete body."
   (with-temp-buffer
@@ -444,6 +457,16 @@ Content-Type: text/html
 \r
 ")
     (should (equal (car (http-server--parse-http-request)) 'Not-Implemented))))
+
+(ert-deftest http-server-parse-transfer-encoding-invalid-chunk-size ()
+  "Request with an invalid chunk size line."
+  (with-temp-buffer
+    (insert "POST / HTTP/1.1\r
+Transfer-Encoding: chunked\r
+\r
+xyz\r
+")
+    (should (equal (car (http-server--parse-http-request)) 'Bad-Request))))
 
 ;;; Parsing request targets
 
@@ -625,6 +648,19 @@ Content-Type: text/html
     (should (respond-with (plz-server 'get server "/")
                           :status 200
                           :headers '((Content-Length . "0"))))))
+
+(ert-deftest http-server-receives-chunked-body-in-pieces ()
+  (with-server server (http-server-start
+                       :on-request (lambda (request)
+                                     `(:status OK :body ,(plist-get request :body)))
+                       :log-level 'trace)
+    (with-raw-connection conn server
+      (process-send-string conn "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+      (should (equal (raw-received conn) ""))
+      (process-send-string conn "5\r\nhello\r\n")
+      (should (equal (raw-received conn) ""))
+      (process-send-string conn "0\r\n\r\n")
+      (should (string-suffix-p "\r\n\r\nhello" (raw-read-response conn))))))
 
 ;;; Persistent connections
 

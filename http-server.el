@@ -724,11 +724,18 @@ body."
           (when (not (equal transfer-encoding "chunked"))
             (throw 'result '(Not-Implemented . "Unsupported Transfer-Encoding")))
           (let (body)
-            (while (looking-at http-server--chunk-regexp)
+            (while t
+              (unless (looking-at http-server--chunk-regexp)
+                (throw 'result (if (search-forward "\r\n" nil t)
+                                   '(Bad-Request . "Invalid chunk size")
+                                 'incomplete)))
               (goto-char (match-end 0))
               (let* ((chunk-len-match (match-string 1))
                      (chunk-len (string-to-number chunk-len-match 16))
                      (chunk-end (+ (point) chunk-len)))
+                ;; Wait for the chunk data and the CRLF after it
+                (when (> (+ chunk-end 2) buffer-end)
+                  (throw 'result 'incomplete))
                 (when (zerop chunk-len)
                   ;; Chunked trailer sections seem like an exotic HTTP feature
                   (when (not (looking-at "\r\n"))
@@ -740,8 +747,6 @@ body."
                             :headers ,(assoc-delete-all "Transfer-Encoding" headers
                                                         #'string-equal-ignore-case)
                             :body ,(apply #'concat (reverse body)))))
-                (when (> chunk-end buffer-end)
-                  (throw 'result 'incomplete))
                 (push (buffer-substring (point) chunk-end) body)
                 (goto-char chunk-end)
                 (when (not (looking-at "\r\n"))
