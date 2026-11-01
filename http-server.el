@@ -378,7 +378,7 @@ strings."
   (delete-process server)
   (when-let* (((process-get server :kill-log-buffer))
               (log-buffer (process-get server :log-buffer))
-              (buffer-live-p log-buffer))
+              ((buffer-live-p log-buffer)))
     (kill-buffer log-buffer)))
 
 ;;; Connection management
@@ -419,7 +419,7 @@ MESSAGE contains additional information."
     (http-server--log proc (trace "Connection closed")))
   (when-let* (((process-get proc :kill-connection-buffers))
               (buffer (process-buffer proc))
-              (buffer-live-p buffer))
+              ((buffer-live-p buffer)))
     (kill-buffer buffer)))
 
 (defun http-server--connection-close-p (headers)
