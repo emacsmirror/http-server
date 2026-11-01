@@ -401,6 +401,7 @@ MESSAGE contains additional information."
                      :kill-connection-buffers))
     (process-put proc keyword (process-get server keyword)))
   (process-put proc :state 'idle)
+  (process-put proc :request-id 0)
   (set-process-sentinel proc #'http-server--request-sentinel)
   (let ((buffer (generate-new-buffer
                  (format " *%s-connection* <%s:%s>"
@@ -436,9 +437,14 @@ The :state of PROC tracks the response through the states
   idle              -- waiting for a request
   awaiting-response -- the request handler has not responded yet
   headers-sent      -- the status line and headers have been sent
-and returns to idle when the response is complete."
+and returns to idle when the response is complete.
+
+Return the ID of the new request."
   (process-put proc :state 'awaiting-response)
-  (process-put proc :close close))
+  (process-put proc :close close)
+  (let ((request-id (1+ (process-get proc :request-id))))
+    (process-put proc :request-id request-id)
+    request-id))
 
 (defun http-server--request-pending-p (proc)
   "Return non-nil if PROC has received data for another request."
@@ -513,8 +519,8 @@ until the current one has been processed."
 			     (trace (with-current-buffer (process-buffer proc)
 				            (http-server--log-fill (http-server--log-escape (buffer-string))))))
 	       ;; We cannot know where the next request would start
-	       (http-server--begin-response proc t)
-	       (http-server--send-response proc `(:status ,status)))
+	       (http-server--send-response
+          proc (http-server--begin-response proc t) `(:status ,status)))
 
 	      ;; Parsing succeeded
 	      (raw-request
@@ -546,39 +552,41 @@ until the current one has been processed."
             (http-server--log proc
 			        (debug (format "Could not decode request: %s" context)))
             ;; Reject request targets other than origin-form
-            (http-server--begin-response proc t)
-            (http-server--send-response proc `(:status ,status)))
+            (http-server--send-response
+             proc (http-server--begin-response proc t) `(:status ,status)))
 
            ;; Structuring succeeded
            (request
-            (http-server--begin-response
-             proc (http-server--connection-close-p (plist-get request :headers)))
-            ;; Any request could be an Upgrade request, so check that first
-            (if-let* ((on-upgrade (process-get proc :on-upgrade))
-                      ((alist-get 'Upgrade (plist-get request :headers))))
-		            (funcall on-upgrade proc request
-			                   (lambda (response)
-                           (http-server--send-response
-                            proc response
-                            :upgrade (memq (plist-get response :status)
-                                           '(101 Switching-Protocols)))))
-              (if (memq (plist-get request :method) '(TRACE OPTIONS CONNECT))
-                  ;; Reject methods for proxies and exotic use-cases
-                  (http-server--send-response proc '(:status Not-Implemented))
-		            (if-let* ((on-request (process-get proc :on-request)))
-                    (pcase (func-arity on-request)
-                      (`(1 . 1)
-                       (http-server--send-response proc (funcall on-request request)))
-                      (`(2 . 2)
-                       (funcall on-request
-				                        request
-				                        (lambda (response)
-                                  (http-server--send-response proc response))))
-                      (arity
-                       (signal 'http-server-error
-                               `("ON-REQUEST must accept exactly 1 or exactly 2 arguments, "
-				                         "but accepts " ,arity))))
-                  (http-server--send-response proc '(:status Not-Found))))))))))))
+            (let ((request-id (http-server--begin-response
+                               proc (http-server--connection-close-p
+                                     (plist-get request :headers)))))
+              ;; Any request could be an Upgrade request, so check that first
+              (if-let* ((on-upgrade (process-get proc :on-upgrade))
+                        ((alist-get 'Upgrade (plist-get request :headers))))
+                  (funcall on-upgrade proc request
+                           (lambda (response)
+                             (http-server--send-response
+                              proc request-id response
+                              :upgrade (memq (plist-get response :status)
+                                             '(101 Switching-Protocols)))))
+                (if (memq (plist-get request :method) '(TRACE OPTIONS CONNECT))
+                    ;; Reject methods for proxies and exotic use-cases
+                    (http-server--send-response proc request-id '(:status Not-Implemented))
+                  (if-let* ((on-request (process-get proc :on-request)))
+                      (pcase (func-arity on-request)
+                        (`(1 . 1)
+                         (http-server--send-response
+                          proc request-id (funcall on-request request)))
+                        (`(2 . 2)
+                         (funcall on-request
+                                  request
+                                  (lambda (response)
+                                    (http-server--send-response proc request-id response))))
+                        (arity
+                         (signal 'http-server-error
+                                 `("ON-REQUEST must accept exactly 1 or exactly 2 arguments, "
+                                   "but accepts " ,arity))))
+                    (http-server--send-response proc request-id '(:status Not-Found)))))))))))))
 
 (defun http-server--request-sentinel (proc event)
   "Handle PROC receiving an EVENT."
@@ -799,8 +807,8 @@ connection has been closed."
                        err))
        (signal (car err) (cdr err))))))
 
-(cl-defun http-server--send-response (proc response &key upgrade)
-  "Send an HTTP RESPONSE to PROC.
+(cl-defun http-server--send-response (proc request-id response &key upgrade)
+  "Send an HTTP RESPONSE to the request REQUEST-ID on PROC.
 
 RESPONSE is a plist (:status STATUS :headers HEADERS :body BODY) where
 STATUS is either a full status line like \"200 OK\", a symbol denoting
@@ -811,10 +819,17 @@ optional unibyte string.
 If UPGRADE is non-nil, leave the connection to the caller after the
 response, for example to switch protocols after 101 Switching Protocols.
 
-Signal an error if PROC is not awaiting a response.  Any other error
-aborts the response, see `http-server--abort-response'."
-  (unless (eq (process-get proc :state) 'awaiting-response)
-    (signal 'http-server-error '("Cannot send-response twice.")))
+Signal an error if PROC is not awaiting a response to REQUEST-ID.  Any
+other error aborts the response, see `http-server--abort-response'."
+  (let ((current-id (process-get proc :request-id)))
+    (cond
+     ((not (eql request-id current-id))
+      (signal 'http-server-error
+              (list (format "Cannot send-response to request %d while handling request %d."
+                            request-id current-id))))
+     ((not (eq (process-get proc :state) 'awaiting-response))
+      (signal 'http-server-error
+              (list (format "Cannot send-response to request %d twice." request-id))))))
   ;; Asynchronous responses are potentially outside of the error handler in
   ;; `http-server--process-request', so establish a new one
   (handler-bind
@@ -896,12 +911,15 @@ See `http-server--send-response' for RESPONSE and UPGRADE."
         (http-server--process-send-string proc body)
         (unless upgrade (http-server--finalize-response proc)))
        ((functionp body)
-        (funcall body (apply-partially #'http-server--send-chunk proc)))
+        (funcall body (apply-partially #'http-server--send-chunk
+                                       proc (process-get proc :request-id))))
        (t
         (unless upgrade (http-server--finalize-response proc)))))))
 
-(cl-defun http-server--send-chunk (proc chunk &key keep-open)
-  "Send CHUNK to connection PROC with chunked transfer encoding.
+(cl-defun http-server--send-chunk (proc request-id chunk &key keep-open)
+  "Send CHUNK of the response to request REQUEST-ID on PROC.
+
+The response is sent with chunked transfer encoding.
 
 If KEEP-OPEN is non-nil, keep the response open for further chunks.
 Otherwise, finalize the response.
@@ -912,6 +930,19 @@ Sending an empty string finalizes the response."
       (http-server--log proc
         (error message))
       (signal 'http-server-client-disconnected (list message))))
+  (let ((current-id (process-get proc :request-id)))
+    (when-let* ((message
+                 (cond
+                  ((not (eql request-id current-id))
+                   (format "Cannot send-chunk to request %d while handling request %d."
+                           request-id current-id))
+                  ((not (eq (process-get proc :state) 'headers-sent))
+                   (format "Cannot send-chunk to the finalized response to request %d."
+                           request-id)))))
+      (setq message (concat message " Pass :keep-open t for the previous chunk to keep the response open."))
+      (http-server--log proc
+        (error message))
+      (signal 'http-server-error (list message))))
   (if (length= chunk 0)
       (progn
         ;; An empty chunk is equal to the last-chunk marker, so finalize the response

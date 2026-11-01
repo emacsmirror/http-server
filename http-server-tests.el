@@ -788,5 +788,53 @@ Content-Type: text/html
         (should (string-suffix-p "1\r\na\r\n1\r\nz\r\n0\r\n\r\n" (raw-read-response conn)))
         (should (string-suffix-p "\r\n\r\n/b" (raw-read-response conn)))))))
 
+;;; Avoiding cross-talk between requests via stale callbacks
+
+(ert-deftest http-server-rejects-stale-send-response ()
+  (let (send-a send-b)
+    (with-server server (http-server-start
+                         :on-request (lambda (request send-response)
+                                       (if (equal (plist-get request :path) "/a")
+                                           (progn
+                                             (setq send-a send-response)
+                                             (funcall send-response '(:status OK :body "/a")))
+                                         (setq send-b send-response)))
+                         :log-level 'trace)
+      (with-raw-connection conn server
+        (should (string-suffix-p "\r\n\r\n/a"
+                                 (raw-response conn "GET /a HTTP/1.1\r\nHost: x\r\n\r\n")))
+        (process-send-string conn "GET /b HTTP/1.1\r\nHost: x\r\n\r\n")
+        (wait-for send-b)
+        (should (equal (cadr (should-error (funcall send-a '(:status OK :body "stale"))
+                                           :type 'http-server-error))
+                       "Cannot send-response to request 1 while handling request 2."))
+        (should (equal (raw-received conn) ""))
+        (funcall send-b '(:status OK :body "/b"))
+        (should (string-suffix-p "\r\n\r\n/b" (raw-read-response conn)))))))
+
+(ert-deftest http-server-rejects-stale-send-chunk ()
+  (let (send-chunk-a send-b)
+    (with-server server (http-server-start
+                         :on-request (lambda (request send-response)
+                                       (if (equal (plist-get request :path) "/a")
+                                           (funcall send-response
+                                                    `( :status OK
+                                                       :body ,(lambda (send-chunk)
+                                                                (setq send-chunk-a send-chunk)
+                                                                (funcall send-chunk "a"))))
+                                         (setq send-b send-response)))
+                         :log-level 'trace)
+      (with-raw-connection conn server
+        (should (string-suffix-p "1\r\na\r\n0\r\n\r\n"
+                                 (raw-response conn "GET /a HTTP/1.1\r\nHost: x\r\n\r\n")))
+        (process-send-string conn "GET /b HTTP/1.1\r\nHost: x\r\n\r\n")
+        (wait-for send-b)
+        (should (string-prefix-p "Cannot send-chunk to request 1 while handling request 2."
+                                 (cadr (should-error (funcall send-chunk-a "stale")
+                                                     :type 'http-server-error))))
+        (should (equal (raw-received conn) ""))
+        (funcall send-b '(:status OK :body "/b"))
+        (should (string-suffix-p "\r\n\r\n/b" (raw-read-response conn)))))))
+
 (provide 'http-server-tests)
 ;;; http-server-tests.el ends here
