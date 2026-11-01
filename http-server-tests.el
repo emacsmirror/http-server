@@ -674,6 +674,19 @@ Content-Type: text/html
         (should (string-prefix-p "HTTP/1.1 500"
                                  (raw-response conn "GET / HTTP/1.1\r\nHost: x\r\n\r\n")))))))
 
+(ert-deftest http-server-keeps-connection-alive-after-invalid-async-response ()
+  "An error in SEND-RESPONSE inside of the request filter is handled once."
+  (with-server server (http-server-start
+                       :on-request (lambda (_request send-response)
+                                     (funcall send-response '(:status 999)))
+                       :log-level 'trace)
+    (with-filter-errors-ignored
+      (with-raw-connection conn server
+        (let ((response (raw-response conn "GET / HTTP/1.1\r\nHost: x\r\n\r\n")))
+          (should (string-prefix-p "HTTP/1.1 500" response))
+          (should-not (raw-header response "Connection")))
+        (should-not (raw-closed-p conn))))))
+
 (ert-deftest http-server-closes-connection-on-error-after-headers ()
   (with-server server (http-server-start
                        :on-request (lambda (_request)

@@ -454,16 +454,21 @@ If the client is awaiting a response, send an error response.  If they
 are not awaiting a response, or the error occurred while sending a
 response, close the connection to avoid leaving the connection in an
 invalid state."
-  (http-server--log proc
-    (error (format "Error during request handling:\n%s"
-                   (http-server--prefix-lines
-                    "| "
-                    (http-server--log-fill (error-message-string err))))))
-  (if (eq (process-get proc :state) 'awaiting-response)
-      (condition-case nil
-          (http-server--send-response proc '(:status Internal-Server-Error))
-        (error (http-server--close-connection proc)))
-    (http-server--close-connection proc)))
+  ;; The error handlers in `http-server--request-filter' and
+  ;; `http-server--send-response' are nested, so both see the same
+  ;; error
+  (unless (eq err (process-get proc :aborted-error))
+    (process-put proc :aborted-error err)
+    (http-server--log proc
+      (error (format "Error during request handling:\n%s"
+                     (http-server--prefix-lines
+                      "| "
+                      (http-server--log-fill (error-message-string err))))))
+    (if (eq (process-get proc :state) 'awaiting-response)
+        (condition-case nil
+            (http-server--write-response proc '(:status Internal-Server-Error))
+          (error (http-server--close-connection proc)))
+      (http-server--close-connection proc))))
 
 (defun http-server--request-filter (proc chunk)
   "Handle client connection PROC receiving CHUNK."
@@ -536,7 +541,7 @@ invalid state."
                     ((alist-get 'Upgrade (plist-get request :headers))))
               (funcall on-upgrade proc request
                        (lambda (response)
-                         (http-server--send-response-async
+                         (http-server--send-response
                           proc response
                           :upgrade (memq (plist-get response :status)
                                          '(101 Switching-Protocols)))))
@@ -551,7 +556,7 @@ invalid state."
                      (funcall on-request
                               request
                               (lambda (response)
-                                (http-server--send-response-async proc response))))
+                                (http-server--send-response proc response))))
                     (arity
                      (signal 'http-server-error
                              `("ON-REQUEST must accept exactly 1 or exactly 2 arguments, "
@@ -777,26 +782,6 @@ connection has been closed."
                        err))
        (signal (car err) (cdr err))))))
 
-(cl-defun http-server--send-response-async (proc response &key upgrade)
-  "Send an HTTP RESPONSE to PROC from an asynchronous request handler.
-
-RESPONSE is a plist (:status STATUS :headers HEADERS :body BODY) where
-STATUS is either a full status line like \"200 OK\", a symbol denoting
-an HTTP status or a numerical HTTP status code, HEADERS is an ALIST
-of (NAME . VALUE) pairs with symbol NAME and string VALUE and BODY is an
-optional unibyte string.
-
-If UPGRADE is non-nil, leave the connection to the caller after the
-response, for example to switch protocols after 101 Switching Protocols."
-  (unless (eq (process-get proc :state) 'awaiting-response)
-    (signal 'http-server-error '("Cannot send-response twice.")))
-  ;; Because the response is asynchronous, we are potentially outside
-  ;; of the error handler in `http-server--request-filter', so
-  ;; establish a new one.
-  (handler-bind
-      ((error (lambda (err) (http-server--abort-response proc err))))
-    (http-server--send-response proc response :upgrade upgrade)))
-
 (cl-defun http-server--send-response (proc response &key upgrade)
   "Send an HTTP RESPONSE to PROC.
 
@@ -807,7 +792,22 @@ of (NAME . VALUE) pairs with symbol NAME and string VALUE and BODY is an
 optional unibyte string.
 
 If UPGRADE is non-nil, leave the connection to the caller after the
-response, for example to switch protocols after 101 Switching Protocols."
+response, for example to switch protocols after 101 Switching Protocols.
+
+Signal an error if PROC is not awaiting a response.  Any other error
+aborts the response, see `http-server--abort-response'."
+  (unless (eq (process-get proc :state) 'awaiting-response)
+    (signal 'http-server-error '("Cannot send-response twice.")))
+  ;; Asynchronous responses are potentially outside of the error handler in
+  ;; `http-server--request-filter', so establish a new one
+  (handler-bind
+      ((error (lambda (err) (http-server--abort-response proc err))))
+    (http-server--write-response proc response :upgrade upgrade)))
+
+(cl-defun http-server--write-response (proc response &key upgrade)
+  "Write RESPONSE to PROC without checking the state or handling errors.
+
+See `http-server--send-response' for RESPONSE and UPGRADE."
   (let* ((status (or (plist-get response :status) (process-get proc :default-status)))
          (headers (plist-get response :headers))
          (body (plist-get response :body))
