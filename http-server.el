@@ -678,13 +678,23 @@ body."
 
       ;; Parse request body
       (goto-char (match-end 0))
-      (let ((content-length (cdr (assoc "Content-Length" headers
-                                        #'string-equal-ignore-case)))
-            (transfer-encoding (cdr (assoc "Transfer-Encoding" headers
-                                           #'string-equal-ignore-case))))
+      (let* ((content-lengths (cl-loop for (name . value) in headers
+                                       when (string-equal-ignore-case name "Content-Length")
+                                       collect value))
+             (transfer-encodings (cl-loop for (name . value) in headers
+                                          when (string-equal-ignore-case name "Transfer-Encoding")
+                                          collect value))
+             (content-length (car content-lengths))
+             (transfer-encoding (car transfer-encodings)))
         (cond
+         ;; Ambiguous content lengths and transfer encodings are invalid
+         ((cdr content-lengths)
+          '(Bad-Request . "Multiple Content-Length headers"))
+         ((cdr transfer-encodings)
+          (throw 'result '(Bad-Request . "Multiple Transfer-Encoding headers")))
          ;; These are incompatible
-         ((and content-length transfer-encoding) '(Bad-Request . "Content-Length and Transfer-Encoding are incompatible"))
+         ((and content-length transfer-encoding)
+          '(Bad-Request . "Content-Length and Transfer-Encoding are incompatible"))
          ;; No body announced, so we are done
          ((not (or content-length transfer-encoding))
           `( :method ,method

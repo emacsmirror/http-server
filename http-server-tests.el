@@ -384,6 +384,29 @@ Transfer-Encoding: chunked\r
 ")
     (should (equal (car (http-server--parse-http-request)) 'Bad-Request))))
 
+(ert-deftest http-server-parse-request-with-multiple-content-lengths ()
+  "Parsing fails with multiple Content-Length headers."
+  (dolist (second-length '("5" "1"))
+    (with-temp-buffer
+      (insert (format "PATCH / HTTP/1.1\r
+Content-Length: 1\r
+content-length: %s\r
+\r
+hello" second-length))
+      (should (equal (car (http-server--parse-http-request)) 'Bad-Request)))))
+
+(ert-deftest http-server-parse-request-with-multiple-transfer-encodings ()
+  "Parsing fails with multiple Transfer-Encoding headers."
+  (with-temp-buffer
+    (insert "PATCH / HTTP/1.1\r
+Transfer-Encoding: chunked\r
+Transfer-Encoding: chunked\r
+\r
+0\r
+\r
+")
+    (should (equal (car (http-server--parse-http-request)) 'Bad-Request))))
+
 (ert-deftest http-server-parse-transfer-encoding-chunk-too-long ()
   "Request with a TE chunk longer than announced."
   (with-temp-buffer
