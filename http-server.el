@@ -440,12 +440,20 @@ and returns to idle when the response is complete."
   (process-put proc :state 'awaiting-response)
   (process-put proc :close close))
 
+(defun http-server--request-pending-p (proc)
+  "Return non-nil if PROC has received data for another request."
+  (> (buffer-size (process-buffer proc)) 0))
+
 (defun http-server--finalize-response (proc)
-  "Close PROC after a complete response unless it is kept alive."
+  "Close PROC after a complete response or handle the next request."
   (process-put proc :state 'idle)
   (if (process-get proc :close)
       (http-server--close-connection proc)
-    (http-server--log proc (trace "Keeping connection alive"))))
+    (http-server--log proc (trace "Keeping connection alive"))
+    ;; Requests might have arrived during the response.  Handle them
+    ;; from a timer to clear the stack.
+    (when (http-server--request-pending-p proc)
+      (run-at-time 0 nil #'http-server--process-request proc))))
 
 (defun http-server--abort-response (proc err)
   "Abort the response on PROC because of error ERR.
@@ -454,7 +462,7 @@ If the client is awaiting a response, send an error response.  If they
 are not awaiting a response, or the error occurred while sending a
 response, close the connection to avoid leaving the connection in an
 invalid state."
-  ;; The error handlers in `http-server--request-filter' and
+  ;; The error handlers in `http-server--process-request' and
   ;; `http-server--send-response' are nested, so both see the same
   ;; error
   (unless (eq err (process-get proc :aborted-error))
@@ -472,96 +480,105 @@ invalid state."
 
 (defun http-server--request-filter (proc chunk)
   "Handle client connection PROC receiving CHUNK."
-  (handler-bind
-      ;; Last resort response in case an error interrupts request handling
-      ((error (lambda (err) (http-server--abort-response proc err))))
+  (http-server--log proc
+    (debug (format "Chunk received: %d bytes" (length chunk))))
+  (when-let* ((buffer (process-buffer proc))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (goto-char (process-mark proc))
+      (insert chunk)
+      (set-marker (process-mark proc) (point)))
+    (http-server--process-request proc)))
 
-    (http-server--log proc
-      (debug (format "Chunk received: %d bytes" (length chunk))))
-    (when-let* ((buffer (process-buffer proc))
-                ((buffer-live-p buffer)))
-      (with-current-buffer buffer
-        (goto-char (process-mark proc))
-        (insert chunk)
-        (set-marker (process-mark proc) (point))))
-    (pcase (with-current-buffer (process-buffer proc)
-             (http-server--parse-http-request))
-      ('incomplete
-       (http-server--log proc (trace "Request incomplete")))
+(defun http-server--process-request (proc)
+  "Parse and handle the next request in the buffer of PROC.
 
-      ;; Parsing failed
-      (`(,(and status (pred (not keywordp))) . ,context)
-       (http-server--log proc
-         (debug (format "Request parsing failed: %s" context))
-         (trace (with-current-buffer (process-buffer proc)
-                  (http-server--log-fill (http-server--log-escape (buffer-string))))))
-       ;; We cannot know where the next request would start
-       (http-server--begin-response proc t)
-       (http-server--send-response proc `(:status ,status)))
+Requests are handled one at a time in order of arrival, so do nothing
+unless PROC is idle.  Otherwise, the next request stays in the buffer
+until the current one has been processed."
+  (when (and (process-live-p proc)
+             (eq (process-get proc :state) 'idle))
+    (handler-bind
+        ;; Last resort response in case an error interrupts request handling
+        ((error (lambda (err) (http-server--abort-response proc err))))
+      (pcase (with-current-buffer (process-buffer proc)
+               (http-server--parse-http-request))
+	      ('incomplete
+	       (http-server--log proc (trace "Request incomplete")))
 
-      ;; Parsing succeeded
-      (raw-request
-       (http-server--log proc
-         (info
-          (format "> %s %s"
-                  (plist-get raw-request :method)
-                  (http-server--log-escape (plist-get raw-request :target))))
-         (debug
-          (http-server--prefix-lines
-           "> "
-           (mapconcat (lambda (header) (format "%s: %s" (car header) (cdr header)))
-                      (plist-get raw-request :headers) "\n")))
-         (trace
-          (if-let* ((body (plist-get raw-request :body)))
-              (http-server--prefix-lines
-               "> "
-               (concat "\n"
-                       (http-server--log-fill (http-server--log-escape body))))
-            "No message body")))
-       ;; Delete request bytes from buffer to prepare parsing pipelined requests or
-       ;; upgraded connection data
-       (with-current-buffer (process-buffer proc)
-         (delete-region (point-min) (point))
-         (set-marker (process-mark proc) (point-max)))
-       (pcase (http-server--structure-request proc raw-request)
-         ;; Structuring failed
-         (`(,(and status (pred (not keywordp))) . ,context)
-          (http-server--log proc
-            (debug (format "Could not decode request: %s" context)))
-          ;; Reject request targets other than origin-form
-          (http-server--begin-response proc t)
-          (http-server--send-response proc `(:status ,status)))
+	      ;; Parsing failed
+	      (`(,(and status (pred (not keywordp))) . ,context)
+	       (http-server--log proc
+			     (debug (format "Request parsing failed: %s" context))
+			     (trace (with-current-buffer (process-buffer proc)
+				            (http-server--log-fill (http-server--log-escape (buffer-string))))))
+	       ;; We cannot know where the next request would start
+	       (http-server--begin-response proc t)
+	       (http-server--send-response proc `(:status ,status)))
 
-         ;; Structuring succeeded
-         (request
-          (http-server--begin-response
-           proc (http-server--connection-close-p (plist-get request :headers)))
-          ;; Any request could be an Upgrade request, so check that first
-          (if-let* ((on-upgrade (process-get proc :on-upgrade))
-                    ((alist-get 'Upgrade (plist-get request :headers))))
-              (funcall on-upgrade proc request
-                       (lambda (response)
-                         (http-server--send-response
-                          proc response
-                          :upgrade (memq (plist-get response :status)
-                                         '(101 Switching-Protocols)))))
-            (if (memq (plist-get request :method) '(TRACE OPTIONS CONNECT))
-                ;; Reject methods for proxies and exotic use-cases
-                (http-server--send-response proc '(:status Not-Implemented))
-              (if-let* ((on-request (process-get proc :on-request)))
-                  (pcase (func-arity on-request)
-                    (`(1 . 1)
-                     (http-server--send-response proc (funcall on-request request)))
-                    (`(2 . 2)
-                     (funcall on-request
-                              request
-                              (lambda (response)
-                                (http-server--send-response proc response))))
-                    (arity
-                     (signal 'http-server-error
-                             `("ON-REQUEST must accept exactly 1 or exactly 2 arguments, "
-                               "but accepts " ,arity))))
-                (http-server--send-response proc '(:status Not-Found)))))))))))
+	      ;; Parsing succeeded
+	      (raw-request
+	       (http-server--log proc
+			     (info
+			      (format "> %s %s"
+				            (plist-get raw-request :method)
+				            (http-server--log-escape (plist-get raw-request :target))))
+			     (debug
+			      (http-server--prefix-lines
+			       "> "
+			       (mapconcat (lambda (header) (format "%s: %s" (car header) (cdr header)))
+					              (plist-get raw-request :headers) "\n")))
+			     (trace
+			      (if-let* ((body (plist-get raw-request :body)))
+				        (http-server--prefix-lines
+				         "> "
+				         (concat "\n"
+					               (http-server--log-fill (http-server--log-escape body))))
+			        "No message body")))
+	       ;; Delete request bytes from buffer to prepare parsing
+	       ;; pipelined requests or upgraded connection data
+	       (with-current-buffer (process-buffer proc)
+           (delete-region (point-min) (point))
+           (set-marker (process-mark proc) (point-max)))
+	       (pcase (http-server--structure-request proc raw-request)
+           ;; Structuring failed
+           (`(,(and status (pred (not keywordp))) . ,context)
+            (http-server--log proc
+			        (debug (format "Could not decode request: %s" context)))
+            ;; Reject request targets other than origin-form
+            (http-server--begin-response proc t)
+            (http-server--send-response proc `(:status ,status)))
+
+           ;; Structuring succeeded
+           (request
+            (http-server--begin-response
+             proc (http-server--connection-close-p (plist-get request :headers)))
+            ;; Any request could be an Upgrade request, so check that first
+            (if-let* ((on-upgrade (process-get proc :on-upgrade))
+                      ((alist-get 'Upgrade (plist-get request :headers))))
+		            (funcall on-upgrade proc request
+			                   (lambda (response)
+                           (http-server--send-response
+                            proc response
+                            :upgrade (memq (plist-get response :status)
+                                           '(101 Switching-Protocols)))))
+              (if (memq (plist-get request :method) '(TRACE OPTIONS CONNECT))
+                  ;; Reject methods for proxies and exotic use-cases
+                  (http-server--send-response proc '(:status Not-Implemented))
+		            (if-let* ((on-request (process-get proc :on-request)))
+                    (pcase (func-arity on-request)
+                      (`(1 . 1)
+                       (http-server--send-response proc (funcall on-request request)))
+                      (`(2 . 2)
+                       (funcall on-request
+				                        request
+				                        (lambda (response)
+                                  (http-server--send-response proc response))))
+                      (arity
+                       (signal 'http-server-error
+                               `("ON-REQUEST must accept exactly 1 or exactly 2 arguments, "
+				                         "but accepts " ,arity))))
+                  (http-server--send-response proc '(:status Not-Found))))))))))))
 
 (defun http-server--request-sentinel (proc event)
   "Handle PROC receiving an EVENT."
@@ -799,7 +816,7 @@ aborts the response, see `http-server--abort-response'."
   (unless (eq (process-get proc :state) 'awaiting-response)
     (signal 'http-server-error '("Cannot send-response twice.")))
   ;; Asynchronous responses are potentially outside of the error handler in
-  ;; `http-server--request-filter', so establish a new one
+  ;; `http-server--process-request', so establish a new one
   (handler-bind
       ((error (lambda (err) (http-server--abort-response proc err))))
     (http-server--write-response proc response :upgrade upgrade)))

@@ -155,6 +155,10 @@ Unlike curl, a raw connection exposes connection reuse and closing."
 (cl-defun raw-response (conn request &key (timeout 1))
   "Send REQUEST on CONN and return the complete response as a string."
   (process-send-string conn request)
+  (raw-read-response conn :timeout timeout))
+
+(cl-defun raw-read-response (conn &key (timeout 1))
+  "Wait for the next complete response on CONN and return it as a string."
   (with-current-buffer (process-buffer conn)
     (let (end)
       (with-timeout (timeout (error "Incomplete response: %S" (buffer-string)))
@@ -162,6 +166,18 @@ Unlike curl, a raw connection exposes connection reuse and closing."
           (accept-process-output conn 0.01)))
       (prog1 (buffer-substring (point-min) end)
         (delete-region (point-min) end)))))
+
+(defun raw-received (conn)
+  "Wait briefly and return everything received on CONN so far."
+  (accept-process-output conn 0.1)
+  (with-current-buffer (process-buffer conn)
+    (buffer-string)))
+
+(defmacro wait-for (form)
+  "Process events until FORM is non-nil."
+  `(with-timeout (1 (error "Timed out waiting for %S" ',form))
+     (while (not ,form)
+       (accept-process-output nil 0.01))))
 
 (cl-defun raw-closed-p (conn &key (timeout 0.2))
   "Return non-nil if the server closes CONN within TIMEOUT seconds."
@@ -181,18 +197,18 @@ Unlike curl, a raw connection exposes connection reuse and closing."
       (setq start (match-end 0)))
     (nreverse values)))
 
-(defun ignore-filter-errors (filter &rest args)
-  "Call FILTER with ARGS and ignore errors that would abort batch Emacs."
-  (ignore-errors (apply filter args)))
+(defun ignore-request-errors (process-request &rest args)
+  "Call PROCESS-REQUEST with ARGS and ignore errors that would abort batch Emacs."
+  (ignore-errors (apply process-request args)))
 
-(defmacro with-filter-errors-ignored (&rest body)
-  "Execute BODY while ignoring errors that escape the request filter."
+(defmacro with-request-errors-ignored (&rest body)
+  "Execute BODY while ignoring errors that escape request processing."
   (declare (indent 0) (debug (body)))
   `(unwind-protect
        (progn
-         (advice-add 'http-server--request-filter :around #'ignore-filter-errors)
+         (advice-add 'http-server--process-request :around #'ignore-request-errors)
          ,@body)
-     (advice-remove 'http-server--request-filter #'ignore-filter-errors)))
+     (advice-remove 'http-server--process-request #'ignore-request-errors)))
 
 ;;; Request parsing
 
@@ -665,7 +681,7 @@ Content-Type: text/html
 (ert-deftest http-server-keeps-connection-alive-after-handler-error ()
   (with-server server (http-server-start :on-request (lambda (_request) (error "Boom"))
                                          :log-level 'trace)
-    (with-filter-errors-ignored
+    (with-request-errors-ignored
       (with-raw-connection conn server
         (let ((response (raw-response conn "GET / HTTP/1.1\r\nHost: x\r\n\r\n")))
           (should (string-prefix-p "HTTP/1.1 500" response))
@@ -680,7 +696,7 @@ Content-Type: text/html
                        :on-request (lambda (_request send-response)
                                      (funcall send-response '(:status 999)))
                        :log-level 'trace)
-    (with-filter-errors-ignored
+    (with-request-errors-ignored
       (with-raw-connection conn server
         (let ((response (raw-response conn "GET / HTTP/1.1\r\nHost: x\r\n\r\n")))
           (should (string-prefix-p "HTTP/1.1 500" response))
@@ -695,7 +711,7 @@ Content-Type: text/html
                                                  (funcall send-chunk "a" :keep-open t)
                                                  (error "Boom"))))
                        :log-level 'trace)
-    (with-filter-errors-ignored
+    (with-request-errors-ignored
       (with-raw-connection conn server
         (process-send-string conn "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
         (should (raw-closed-p conn))
@@ -703,6 +719,74 @@ Content-Type: text/html
         (should (string-suffix-p "\r\n\r\n1\r\na\r\n"
                                  (with-current-buffer (process-buffer conn)
                                    (buffer-string))))))))
+
+;;; Request order
+
+(ert-deftest http-server-answers-pipelined-requests-in-order ()
+  (with-server server (http-server-start
+                       :on-request (lambda (request)
+                                     `(:status OK :body ,(plist-get request :path)))
+                       :log-level 'trace)
+    (with-raw-connection conn server
+      (process-send-string conn (concat "GET /a HTTP/1.1\r\nHost: x\r\n\r\n"
+                                        "GET /b HTTP/1.1\r\nHost: x\r\n\r\n"))
+      (should (string-suffix-p "\r\n\r\n/a" (raw-read-response conn)))
+      (should (string-suffix-p "\r\n\r\n/b" (raw-read-response conn))))))
+
+(ert-deftest http-server-defers-requests-until-response-is-finalized ()
+  (let (send-a)
+    (with-server server (http-server-start
+                         :on-request (lambda (request send-response)
+                                       (if (equal (plist-get request :path) "/a")
+                                           (setq send-a send-response)
+                                         (funcall send-response '(:status OK :body "/b"))))
+                         :log-level 'trace)
+      (with-raw-connection conn server
+        (process-send-string conn "GET /a HTTP/1.1\r\nHost: x\r\n\r\n")
+        (wait-for send-a)
+        (process-send-string conn "GET /b HTTP/1.1\r\nHost: x\r\n\r\n")
+        (should (equal (raw-received conn) ""))
+        (funcall send-a '(:status OK :body "/a"))
+        (should (string-suffix-p "\r\n\r\n/a" (raw-read-response conn)))
+        (should (string-suffix-p "\r\n\r\n/b" (raw-read-response conn)))))))
+
+(ert-deftest http-server-defers-invalid-requests-until-response-is-finalized ()
+  (let (send-a)
+    (with-server server (http-server-start
+                         :on-request (lambda (_request send-response)
+                                       (setq send-a send-response))
+                         :log-level 'trace)
+      (with-raw-connection conn server
+        (process-send-string conn "GET /a HTTP/1.1\r\nHost: x\r\n\r\n")
+        (wait-for send-a)
+        (process-send-string conn "GARBAGE\r\n\r\n")
+        (should (equal (raw-received conn) ""))
+        (funcall send-a '(:status OK :body "/a"))
+        (should (string-suffix-p "\r\n\r\n/a" (raw-read-response conn)))
+        (let ((response (raw-read-response conn)))
+          (should (string-prefix-p "HTTP/1.1 400" response))
+          (should (equal (raw-header response "Connection") '("close"))))
+        (should (raw-closed-p conn))))))
+
+(ert-deftest http-server-defers-requests-during-chunked-response ()
+  (let (send-chunk-a)
+    (with-server server (http-server-start
+                         :on-request (lambda (request)
+                                       (if (equal (plist-get request :path) "/a")
+                                           `( :status OK
+                                              :body ,(lambda (send-chunk)
+                                                       (funcall send-chunk "a" :keep-open t)
+                                                       (setq send-chunk-a send-chunk)))
+                                         '(:status OK :body "/b")))
+                         :log-level 'trace)
+      (with-raw-connection conn server
+        (process-send-string conn "GET /a HTTP/1.1\r\nHost: x\r\n\r\n")
+        (wait-for send-chunk-a)
+        (process-send-string conn "GET /b HTTP/1.1\r\nHost: x\r\n\r\n")
+        (should (string-suffix-p "\r\n\r\n1\r\na\r\n" (raw-received conn)))
+        (funcall send-chunk-a "z")
+        (should (string-suffix-p "1\r\na\r\n1\r\nz\r\n0\r\n\r\n" (raw-read-response conn)))
+        (should (string-suffix-p "\r\n\r\n/b" (raw-read-response conn)))))))
 
 (provide 'http-server-tests)
 ;;; http-server-tests.el ends here
