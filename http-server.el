@@ -567,8 +567,11 @@ until the current one has been processed."
                            (lambda (response)
                              (http-server--send-response
                               proc request-id response
-                              :upgrade (memq (plist-get response :status)
-                                             '(101 Switching-Protocols)))))
+                              :upgrade (pcase (plist-get response :status)
+                                         (101 t)
+                                         ('Switching-Protocols t)
+                                         ((and (pred stringp)
+                                               (pred (string-prefix-p "101 "))) t)))))
                 (if (memq (plist-get request :method) '(TRACE OPTIONS CONNECT))
                     ;; Reject methods for proxies and exotic use-cases
                     (http-server--send-response proc request-id '(:status Not-Implemented))
