@@ -270,8 +270,13 @@ unibyte string that will be sent as-is or a function that will be called
 as (funcall BODY SEND-CHUNK). SEND-CHUNK lets BODY send the message body
 asynchronously in multiple chunks. Call as (funcall SEND-CHUNK CHUNK
 :keep-open KEEP-OPEN) where CHUNK is a unibyte string to send and
-KEEP-OPEN, if t, will keep the connection open for more chunks.
-Otherwise, the response will be finalized and the connection closed.
+KEEP-OPEN, if t, will keep the response open for more chunks.
+Otherwise, the response will be finalized.
+
+After a response, the connection stays open for further requests
+unless the request or response has a Connection: close header, the
+request was invalid or an error interrupted the response after its
+headers were sent.
 
 Both SEND-RESPONSE and SEND-CHUNK signal
 `http-server-client-disconnected' if the client has closed the
@@ -395,6 +400,7 @@ MESSAGE contains additional information."
                      :default-status
                      :kill-connection-buffers))
     (process-put proc keyword (process-get server keyword)))
+  (process-put proc :state 'idle)
   (set-process-sentinel proc #'http-server--request-sentinel)
   (let ((buffer (generate-new-buffer
                  (format " *%s-connection* <%s:%s>"
@@ -415,19 +421,55 @@ MESSAGE contains additional information."
               (buffer-live-p buffer))
     (kill-buffer buffer)))
 
+(defun http-server--connection-close-p (headers)
+  "Return non-nil if HEADERS contain any Connection header with close."
+  (cl-loop for (name . value) in headers
+           thereis (and (eq name 'Connection)
+                        (member-ignore-case "close" (split-string value "," t "[ \t]*")))))
+
+(defun http-server--begin-response (proc close)
+  "Prepare connection PROC for responding to a new request.
+
+If CLOSE is non-nil, close PROC after the response.
+
+The :state of PROC tracks the response through the states
+  idle              -- waiting for a request
+  awaiting-response -- the request handler has not responded yet
+  headers-sent      -- the status line and headers have been sent
+and returns to idle when the response is complete."
+  (process-put proc :state 'awaiting-response)
+  (process-put proc :close close))
+
+(defun http-server--finalize-response (proc)
+  "Close PROC after a complete response unless it is kept alive."
+  (process-put proc :state 'idle)
+  (if (process-get proc :close)
+      (http-server--close-connection proc)
+    (http-server--log proc (trace "Keeping connection alive"))))
+
+(defun http-server--abort-response (proc err)
+  "Abort the response on PROC because of error ERR.
+
+If the client is awaiting a response, send an error response.  If they
+are not awaiting a response, or the error occurred while sending a
+response, close the connection to avoid leaving the connection in an
+invalid state."
+  (http-server--log proc
+    (error (format "Error during request handling:\n%s"
+                   (http-server--prefix-lines
+                    "| "
+                    (http-server--log-fill (error-message-string err))))))
+  (if (eq (process-get proc :state) 'awaiting-response)
+      (condition-case nil
+          (http-server--send-response proc '(:status Internal-Server-Error))
+        (error (http-server--close-connection proc)))
+    (http-server--close-connection proc)))
+
 (defun http-server--request-filter (proc chunk)
   "Handle client connection PROC receiving CHUNK."
   (handler-bind
       ;; Last resort response in case an error interrupts request handling
-      ((error
-        (lambda (err)
-          (http-server--log proc
-            (error (format "Error during request handling:\n%s"
-                           (http-server--prefix-lines
-                            "| "
-                            (http-server--log-fill (error-message-string err))))))
-          (ignore-errors
-            (http-server--send-response proc '(:status Internal-Server-Error))))))
+      ((error (lambda (err) (http-server--abort-response proc err))))
 
     (http-server--log proc
       (debug (format "Chunk received: %d bytes" (length chunk))))
@@ -448,6 +490,8 @@ MESSAGE contains additional information."
          (debug (format "Request parsing failed: %s" context))
          (trace (with-current-buffer (process-buffer proc)
                   (http-server--log-fill (http-server--log-escape (buffer-string))))))
+       ;; We cannot know where the next request would start
+       (http-server--begin-response proc t)
        (http-server--send-response proc `(:status ,status)))
 
       ;; Parsing succeeded
@@ -480,10 +524,13 @@ MESSAGE contains additional information."
           (http-server--log proc
             (debug (format "Could not decode request: %s" context)))
           ;; Reject request targets other than origin-form
+          (http-server--begin-response proc t)
           (http-server--send-response proc `(:status ,status)))
 
          ;; Structuring succeeded
          (request
+          (http-server--begin-response
+           proc (http-server--connection-close-p (plist-get request :headers)))
           ;; Any request could be an Upgrade request, so check that first
           (if-let* ((on-upgrade (process-get proc :on-upgrade))
                     ((alist-get 'Upgrade (plist-get request :headers))))
@@ -491,8 +538,8 @@ MESSAGE contains additional information."
                        (lambda (response)
                          (http-server--send-response-async
                           proc response
-                          :keep-open (memq (plist-get response :status)
-                                           '(101 Switching-Protocols)))))
+                          :upgrade (memq (plist-get response :status)
+                                         '(101 Switching-Protocols)))))
             (if (memq (plist-get request :method) '(TRACE OPTIONS CONNECT))
                 ;; Reject methods for proxies and exotic use-cases
                 (http-server--send-response proc '(:status Not-Implemented))
@@ -503,7 +550,8 @@ MESSAGE contains additional information."
                     (`(2 . 2)
                      (funcall on-request
                               request
-                              (apply-partially #'http-server--send-response-async proc)))
+                              (lambda (response)
+                                (http-server--send-response-async proc response))))
                     (arity
                      (signal 'http-server-error
                              `("ON-REQUEST must accept exactly 1 or exactly 2 arguments, "
@@ -729,7 +777,7 @@ connection has been closed."
                        err))
        (signal (car err) (cdr err))))))
 
-(cl-defun http-server--send-response-async (proc response &key keep-open)
+(cl-defun http-server--send-response-async (proc response &key upgrade)
   "Send an HTTP RESPONSE to PROC from an asynchronous request handler.
 
 RESPONSE is a plist (:status STATUS :headers HEADERS :body BODY) where
@@ -738,26 +786,18 @@ an HTTP status or a numerical HTTP status code, HEADERS is an ALIST
 of (NAME . VALUE) pairs with symbol NAME and string VALUE and BODY is an
 optional unibyte string.
 
-If KEEP-OPEN is non-nil, the connection is kept open after the response
-is sent."
+If UPGRADE is non-nil, leave the connection to the caller after the
+response, for example to switch protocols after 101 Switching Protocols."
+  (unless (eq (process-get proc :state) 'awaiting-response)
+    (signal 'http-server-error '("Cannot send-response twice.")))
+  ;; Because the response is asynchronous, we are potentially outside
+  ;; of the error handler in `http-server--request-filter', so
+  ;; establish a new one.
   (handler-bind
-      ;; Because the response is asynchronous, we are potentially outside of the error
-      ;; handler in `http-server--request-filter', so establish a new one.
-      ((error
-        (lambda (err)
-          (http-server--log proc
-            (error (format "Error during request handling:\n%s"
-                           (http-server--prefix-lines
-                            "| "
-                            (http-server--log-fill (error-message-string err))))))
-          (ignore-errors
-            (http-server--send-response proc '(:status Internal-Server-Error))))))
-    (when (process-get proc :response-sent)
-      (signal 'http-server-error '("Cannot send-response twice.")))
-    (process-put proc :response-sent t)
-    (http-server--send-response proc response :keep-open keep-open)))
+      ((error (lambda (err) (http-server--abort-response proc err))))
+    (http-server--send-response proc response :upgrade upgrade)))
 
-(cl-defun http-server--send-response (proc response &key keep-open)
+(cl-defun http-server--send-response (proc response &key upgrade)
   "Send an HTTP RESPONSE to PROC.
 
 RESPONSE is a plist (:status STATUS :headers HEADERS :body BODY) where
@@ -766,11 +806,20 @@ an HTTP status or a numerical HTTP status code, HEADERS is an ALIST
 of (NAME . VALUE) pairs with symbol NAME and string VALUE and BODY is an
 optional unibyte string.
 
-If KEEP-OPEN is non-nil, the connection is kept open after the response
-is sent."
+If UPGRADE is non-nil, leave the connection to the caller after the
+response, for example to switch protocols after 101 Switching Protocols."
   (let* ((status (or (plist-get response :status) (process-get proc :default-status)))
          (headers (plist-get response :headers))
-         (body (plist-get response :body)))
+         (body (plist-get response :body))
+         (close (and (not upgrade)
+                     (or (process-get proc :close)
+                         (http-server--connection-close-p headers)))))
+
+    ;; RFC 9112 §9.6: A server that closes the connection should send
+    ;; the close option
+    (when (and close (not (http-server--connection-close-p headers)))
+      (setq headers (cons '(Connection . "close") headers)))
+    (process-put proc :close close)
 
     ;; Validate body and add implied headers
     (cond
@@ -807,6 +856,7 @@ is sent."
              (response-header (apply #'concat "HTTP/1.1 " status-line "\r\n"
                                      (append header-lines '("\r\n")))))
         (http-server--process-send-string proc response-header)
+        (process-put proc :state 'headers-sent)
         (http-server--log proc
           (info (format "< %s" status-line))
           (debug
@@ -827,29 +877,29 @@ is sent."
       (cond
        ((stringp body)
         (http-server--process-send-string proc body)
-        (unless keep-open (http-server--close-connection proc)))
+        (unless upgrade (http-server--finalize-response proc)))
        ((functionp body)
         (funcall body (apply-partially #'http-server--send-chunk proc)))
        (t
-        (unless keep-open (http-server--close-connection proc)))))))
+        (unless upgrade (http-server--finalize-response proc)))))))
 
 (cl-defun http-server--send-chunk (proc chunk &key keep-open)
   "Send CHUNK to connection PROC with chunked transfer encoding.
 
-If KEEP-OPEN is non-nil, keep the connection open for further chunks.
-Otherwise, close the connection.
+If KEEP-OPEN is non-nil, keep the response open for further chunks.
+Otherwise, finalize the response.
 
-Sending an empty string closes the connection."
+Sending an empty string finalizes the response."
   (unless (process-live-p proc)
-    (let ((message "Cannot send on a closed connection. Pass :keep-open t for the previous chunk to keep the connection open."))
+    (let ((message "Cannot send on a closed connection. Pass :keep-open t for the previous chunk to keep the response open."))
       (http-server--log proc
         (error message))
       (signal 'http-server-client-disconnected (list message))))
   (if (length= chunk 0)
       (progn
-        ;; An empty chunk is equal to the last-chunk marker, so close the connection
+        ;; An empty chunk is equal to the last-chunk marker, so finalize the response
         (http-server--process-send-string proc "0\r\n\r\n")
-        (http-server--close-connection proc))
+        (http-server--finalize-response proc))
     (when (multibyte-string-p chunk)
       (http-server--log proc
         (error "Tried to send multibyte chunk"))
@@ -866,7 +916,7 @@ Sending an empty string closes the connection."
                            (if keep-open "" "0\r\n\r\n"))))
       (http-server--process-send-string proc message)
       (unless keep-open
-        (http-server--close-connection proc)))))
+        (http-server--finalize-response proc)))))
 
 ;;; Utilities
 

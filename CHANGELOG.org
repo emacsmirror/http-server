@@ -1,0 +1,5 @@
+#+title: Changelog
+* Unreleased
+** Added
+*** Persistent connections
+http-server now keeps connections alive for multiple requests on the same TCP connection unless the client sends a `Connection: close` header.

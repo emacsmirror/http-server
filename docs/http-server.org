@@ -168,7 +168,7 @@ http-server automatically adds ~Date~ with the current UTC timestamp (unless you
 
 Sending a multibyte string signals an ~http-server-error~.
 
-When ~:body~ is a function, the response is sent with ~Transfer-Encoding: chunked~. The function is called as ~(funcall BODY SEND-CHUNK)~. ~SEND-CHUNK~ sends one chunk and is called as ~(funcall SEND-CHUNK CHUNK :keep-open KEEP-OPEN)~ where ~CHUNK~ is a unibyte string. If ~:keep-open~ is t, the connection stays open for more chunks. If ~:keep-open~ is nil or omitted, the response is finalized and the connection is closed. For example:
+When ~:body~ is a function, the response is sent with ~Transfer-Encoding: chunked~. The function is called as ~(funcall BODY SEND-CHUNK)~. ~SEND-CHUNK~ sends one chunk and is called as ~(funcall SEND-CHUNK CHUNK :keep-open KEEP-OPEN)~ where ~CHUNK~ is a unibyte string. If ~:keep-open~ is t, the response stays open for more chunks. If ~:keep-open~ is nil or omitted, the response is finalized. For example:
 
 #+begin_src emacs-lisp
   (list :status 'OK
@@ -177,9 +177,11 @@ When ~:body~ is a function, the response is sent with ~Transfer-Encoding: chunke
                 (funcall send-chunk "second part")))
 #+end_src
 
-The body function can also defer sending to a later time, for example from a timer or process filter, as long as it eventually closes the connection by calling SEND-CHUNK without ~:keep-open~.
+The body function can also defer sending to a later time, for example from a timer or process filter, as long as it eventually finalizes the response by calling SEND-CHUNK without ~:keep-open~.
 
 Both SEND-RESPONSE and SEND-CHUNK signal ~http-server-client-disconnected~ if the connection is closed. Because the client can disconnect at any moment, this error can occur even immediately after a successful send, so callers holding long-lived references to SEND-RESPONSE or SEND-CHUNK should always be prepared to handle it. See [[*Client Disconnection]].
+
+After a response, the connection stays open for further requests unless the request or the response has a ~Connection: close~ header, the request was invalid or an error interrupted the response after its headers were sent.
 
 Here are a few complete response examples. A JSON response:
 
