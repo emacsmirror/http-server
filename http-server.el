@@ -279,9 +279,12 @@ request was invalid or an error interrupted the response after its
 headers were sent.
 
 Both SEND-RESPONSE and SEND-CHUNK signal
-`http-server-client-disconnected' if the client has closed the
+`http-server-client-disconnected' if the client has closed or reset the
 connection.  Callers holding long-lived references to SEND-RESPONSE or
-SEND-CHUNK should always be prepared to handle this case.
+SEND-CHUNK should always be prepared to handle this case.  SEND-CHUNK
+signals `http-server-error' if the server has already closed the
+connection, for example after a previous chunk without KEEP-OPEN
+finalized a response with a Connection: close header.
 
 Whenever a request contains an Upgrade header, ON-UPGRADE is called
 as (funcall ON-UPGRADE CONNECTION REQUEST SEND-RESPONSE) if present.
@@ -420,6 +423,9 @@ MESSAGE contains additional information."
 (defun http-server--close-connection (proc)
   "Close connection PROC: delete the process and its buffers."
   (when (process-live-p proc)
+    ;; Tells `http-server--send-chunk' that the server closed the
+    ;; connection, not the client
+    (process-put proc :closed-by-server t)
     (delete-process proc)
     (http-server--log proc (trace "Connection closed")))
   (when-let* (((process-get proc :kill-connection-buffers))
@@ -813,22 +819,36 @@ QUERY is an optional string. Both PATH and QUERY are decoded from UTF-8
 
 ;;; HTTP responses
 
+(defun http-server--signal-client-disconnected (proc &optional err)
+  "Signal `http-server-client-disconnected' for PROC caused by ERR."
+  (signal 'http-server-client-disconnected
+          (cons (format "Client %s:%d disconnected"
+                        (process-contact proc :host)
+                        (process-contact proc :service))
+                (and err (list err)))))
+
 (defun http-server--process-send-string (proc string)
   "Send STRING to network process PROC.
 
 Signal `http-server-client-disconnected' if sending fails because the
-connection has been closed."
+client has closed or reset the connection."
   (condition-case err
       (process-send-string proc string)
     (error
-     (if (and (eq (process-type proc) 'network)
-              (eq (process-status proc) 'closed))
-         (signal 'http-server-client-disconnected
-                 (list (format "Client %s:%d disconnected"
-                               (process-contact proc :host)
-                               (process-contact proc :service))
-                       err))
-       (signal (car err) (cdr err))))))
+     (cond
+      ((not (eq (process-type proc) 'network))
+       (signal (car err) (cdr err)))
+      ;; Emacs closes the process itself on EPIPE
+      ((eq (process-status proc) 'closed)
+       (http-server--signal-client-disconnected proc err))
+      ;; For example ECONNRESET after the client closed the connection
+      ;; with unread data
+      ((eq (car err) 'file-error)
+       ;; The connection is dead, so close it like Emacs does on EPIPE
+       (delete-process proc)
+       (http-server--signal-client-disconnected proc err))
+      (t
+       (signal (car err) (cdr err)))))))
 
 (cl-defun http-server--send-response (proc request-id response &key upgrade)
   "Send an HTTP RESPONSE to the request REQUEST-ID on PROC.
@@ -949,10 +969,14 @@ Otherwise, finalize the response.
 
 Sending an empty string finalizes the response."
   (unless (process-live-p proc)
-    (let ((message "Cannot send on a closed connection. Pass :keep-open t for the previous chunk to keep the response open."))
+    (if (process-get proc :closed-by-server)
+        (let ((message "Cannot send-chunk after the server closed the connection. Pass :keep-open t for the previous chunk to keep the response open."))
+          (http-server--log proc
+            (error message))
+          (signal 'http-server-error (list message)))
       (http-server--log proc
-        (error message))
-      (signal 'http-server-client-disconnected (list message))))
+        (debug "Cannot send-chunk because the client disconnected"))
+      (http-server--signal-client-disconnected proc)))
   (let ((current-id (process-get proc :request-id)))
     (when-let* ((message
                  (cond

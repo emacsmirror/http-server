@@ -179,7 +179,7 @@ When ~:body~ is a function, the response is sent with ~Transfer-Encoding: chunke
 
 The body function can also defer sending to a later time, for example from a timer or process filter, as long as it eventually finalizes the response by calling SEND-CHUNK without ~:keep-open~.
 
-Both SEND-RESPONSE and SEND-CHUNK signal ~http-server-client-disconnected~ if the connection is closed. Because the client can disconnect at any moment, this error can occur even immediately after a successful send, so callers holding long-lived references to SEND-RESPONSE or SEND-CHUNK should always be prepared to handle it. See [[*Client Disconnection]].
+Both SEND-RESPONSE and SEND-CHUNK signal ~http-server-client-disconnected~ if the client has closed or reset the connection. Because the client can disconnect at any moment, this error can occur even immediately after a successful send, so callers holding long-lived references to SEND-RESPONSE or SEND-CHUNK should always be prepared to handle it. See [[*Client Disconnection]]. In contrast, calling SEND-CHUNK after the server itself has closed the connection, for example after a chunk without ~:keep-open~ finalized a response with a ~Connection: close~ header, is a bug in the caller and signals ~http-server-error~.
 
 After a response, the connection stays open for further requests unless the request or the response has a ~Connection: close~ header, the request was invalid or an error interrupted the response after its headers were sent.
 
@@ -243,7 +243,7 @@ A typical pattern for long-running connections such as server-sent events:
 
 - Error: http-server-client-disconnected ::
 
-  Signaled when an attempt to send data fails because the client has disconnected. Parent type: ~http-server-error~. The signal data is a list ~(MESSAGE ORIGINAL-ERROR)~ where MESSAGE is a human-readable description and ORIGINAL-ERROR, if present, is the underlying error caught from ~process-send-string~.
+  Signaled when an attempt to send data fails because the client has closed or reset the connection. Parent type: ~http-server-error~. The signal data is a list ~(MESSAGE ORIGINAL-ERROR)~ where MESSAGE is a human-readable description and ORIGINAL-ERROR, if present, is the underlying error caught from ~process-send-string~.
 
 * WebSockets
 #+cindex: WebSocket

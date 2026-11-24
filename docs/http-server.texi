@@ -19,6 +19,8 @@
 @author Marten Lienen
 @end titlepage
 
+@contents
+
 @ifnottex
 @node Top
 @top http-server.el
@@ -149,7 +151,7 @@ UNKNOWN-HEADERS is called as @code{(funcall UNKNOWN-HEADERS NAME)} for each head
 @end defun
 
 @defun http-server-stop server
-Stop SERVER@. This closes the network socket and@comma{} if @code{:kill-log-buffer} was @code{t} at creation time@comma{} kills the log buffer.
+Stop SERVER@. This closes the network socket and all client connections@comma{} including ones with responses in progress@comma{} and@comma{} if @code{:kill-log-buffer} was @code{t} at creation time@comma{} kills the log buffer.
 @end defun
 
 @menu
@@ -245,7 +247,7 @@ http-server automatically adds @code{Date} with the current UTC timestamp (unles
 
 Sending a multibyte string signals an @code{http-server-error}.
 
-When @code{:body} is a function@comma{} the response is sent with @code{Transfer-Encoding: chunked}. The function is called as @code{(funcall BODY SEND-CHUNK)}. @code{SEND-CHUNK} sends one chunk and is called as @code{(funcall SEND-CHUNK CHUNK :keep-open KEEP-OPEN)} where @code{CHUNK} is a unibyte string. If @code{:keep-open} is t@comma{} the connection stays open for more chunks. If @code{:keep-open} is nil or omitted@comma{} the response is finalized and the connection is closed. For example:
+When @code{:body} is a function@comma{} the response is sent with @code{Transfer-Encoding: chunked}. The function is called as @code{(funcall BODY SEND-CHUNK)}. @code{SEND-CHUNK} sends one chunk and is called as @code{(funcall SEND-CHUNK CHUNK :keep-open KEEP-OPEN)} where @code{CHUNK} is a unibyte string. If @code{:keep-open} is t@comma{} the response stays open for more chunks. If @code{:keep-open} is nil or omitted@comma{} the response is finalized. For example:
 
 @lisp
 (list :status 'OK
@@ -254,9 +256,11 @@ When @code{:body} is a function@comma{} the response is sent with @code{Transfer
               (funcall send-chunk "second part")))
 @end lisp
 
-The body function can also defer sending to a later time@comma{} for example from a timer or process filter@comma{} as long as it eventually closes the connection by calling SEND-CHUNK without @code{:keep-open}.
+The body function can also defer sending to a later time@comma{} for example from a timer or process filter@comma{} as long as it eventually finalizes the response by calling SEND-CHUNK without @code{:keep-open}.
 
-Both SEND-RESPONSE and SEND-CHUNK signal @code{http-server-client-disconnected} if the connection is closed. Because the client can disconnect at any moment@comma{} this error can occur even immediately after a successful send@comma{} so callers holding long-lived references to SEND-RESPONSE or SEND-CHUNK should always be prepared to handle it. See @ref{Client Disconnection}.
+Both SEND-RESPONSE and SEND-CHUNK signal @code{http-server-client-disconnected} if the client has closed or reset the connection. Because the client can disconnect at any moment@comma{} this error can occur even immediately after a successful send@comma{} so callers holding long-lived references to SEND-RESPONSE or SEND-CHUNK should always be prepared to handle it. See @ref{Client Disconnection}. In contrast@comma{} calling SEND-CHUNK after the server itself has closed the connection@comma{} for example after a chunk without @code{:keep-open} finalized a response with a @code{Connection: close} header@comma{} is a bug in the caller and signals @code{http-server-error}.
+
+After a response@comma{} the connection stays open for further requests unless the request or the response has a @code{Connection: close} header@comma{} the request was invalid or an error interrupted the response after its headers were sent.
 
 Here are a few complete response examples. A JSON response:
 
@@ -320,7 +324,7 @@ A typical pattern for long-running connections such as server-sent events:
 
 @table @asis
 @item Error: http-server-client-disconnected
-Signaled when an attempt to send data fails because the client has disconnected. Parent type: @code{http-server-error}. The signal data is a list @code{(MESSAGE ORIGINAL-ERROR)} where MESSAGE is a human-readable description and ORIGINAL-ERROR@comma{} if present@comma{} is the underlying error caught from @code{process-send-string}.
+Signaled when an attempt to send data fails because the client has closed or reset the connection. Parent type: @code{http-server-error}. The signal data is a list @code{(MESSAGE ORIGINAL-ERROR)} where MESSAGE is a human-readable description and ORIGINAL-ERROR@comma{} if present@comma{} is the underlying error caught from @code{process-send-string}.
 @end table
 
 @node WebSockets

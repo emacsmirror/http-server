@@ -917,5 +917,41 @@ xyz\r
         (funcall send-b '(:status OK :body "/b"))
         (should (string-suffix-p "\r\n\r\n/b" (raw-read-response conn)))))))
 
+(ert-deftest http-server-rejects-send-chunk-after-closing-connection ()
+  (let (send-chunk)
+    (with-server server (http-server-start
+                         :on-request (lambda (_request)
+                                       `( :status OK
+                                          :headers ((Connection . "close"))
+                                          :body ,(lambda (send)
+                                                   (setq send-chunk send)
+                                                   (funcall send "a"))))
+                         :log-level 'trace)
+      (with-raw-connection conn server
+        (raw-response conn "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        (let ((err (should-error (funcall send-chunk "stale") :type 'http-server-error)))
+          (should (eq (car err) 'http-server-error))
+          (should (string-match-p "Pass :keep-open t" (cadr err))))))))
+
+;;; Client disconnection
+
+(ert-deftest http-server-send-chunk-signals-client-disconnected ()
+  (let (connection send-chunk)
+    (with-server server (http-server-start
+                         :on-request (lambda (request)
+                                       (setq connection (plist-get request :connection))
+                                       `( :status OK
+                                          :body ,(lambda (send)
+                                                   (funcall send "a" :keep-open t)
+                                                   (setq send-chunk send))))
+                         :log-level 'trace)
+      (with-raw-connection conn server
+        (process-send-string conn "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        (wait-for send-chunk))
+      (wait-for (not (process-live-p connection)))
+      (should (string-match-p "\\`Client .*:[0-9]+ disconnected\\'"
+                              (cadr (should-error (funcall send-chunk "b")
+                                                  :type 'http-server-client-disconnected)))))))
+
 (provide 'http-server-tests)
 ;;; http-server-tests.el ends here

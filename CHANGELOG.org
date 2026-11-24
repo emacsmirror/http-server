@@ -3,3 +3,8 @@
 ** Added
 *** Persistent connections
 http-server now keeps connections alive for multiple requests on the same TCP connection unless the client sends a `Connection: close` header.
+** Fixed
+*** Client disconnection in SEND-CHUNK
+SEND-CHUNK now signals `http-server-client-disconnected` with a plain "Client HOST:PORT disconnected" message and logs at debug level when the client has disconnected. Calling SEND-CHUNK after the server itself closed the connection, for example after finalizing a response with a `Connection: close` header, now signals `http-server-error` with a hint to pass `:keep-open t`.
+*** Connection resets
+SEND-RESPONSE and SEND-CHUNK now signal `http-server-client-disconnected` instead of a raw `file-error` when the client resets the connection, for example by closing it while it still has unread data from the server.
